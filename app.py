@@ -6,7 +6,26 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 5.2", layout="wide")
+st.set_page_config(page_title="CRM Master 5.3", layout="wide")
+
+# --- FUNÇÕES UTILITÁRIAS DE FORMATAÇÃO (O SEGREDO DO VISUAL) ---
+def formatar_moeda(valor):
+    if pd.isna(valor) or valor == '':
+        return "R$ 0,00"
+    try:
+        # Formata com padrão brasileiro: 1.000,00
+        return f"R$ {float(valor):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    except:
+        return valor
+
+def formatar_data(data):
+    if pd.isna(data) or str(data).strip() == '':
+        return "-"
+    try:
+        # Garante que é datetime e formata DD/MM/AAAA
+        return pd.to_datetime(data).strftime('%d/%m/%Y')
+    except:
+        return str(data) # Retorna original se falhar
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def conectar_google_sheets():
@@ -91,6 +110,7 @@ def salvar_interacao_nuvem(cnpj, data, tipo, resumo, vendedor, valor=0.0):
     try:
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
+        # Salva no formato brasileiro na planilha também para facilitar leitura direta lá
         valor_str = f"{valor:.2f}".replace('.', ',')
         sheet.append_row([str(cnpj), str(data), tipo, resumo, vendedor, valor_str])
         st.cache_data.clear()
@@ -117,7 +137,7 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         return False
 
 # --- INTERFACE ---
-st.sidebar.title("🚀 CRM Master 5.2")
+st.sidebar.title("🚀 CRM Master 5.3")
 
 df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -208,10 +228,10 @@ if df is not None and not df.empty:
     if usuario_logado == "GESTOR":
         st.title("📊 Painel Geral & Financeiro")
 
-        # 1. ÁREA DE FILTROS
+        # 1. FILTROS
         with st.container(border=True):
             col_f1, col_f2, col_f3 = st.columns(3)
-            # CORREÇÃO: Padrão agora é voltar 30 dias para pegar dados recentes
+            # Default: 30 dias atrás
             data_padrao_ini = hoje - timedelta(days=30)
             
             data_inicio = col_f1.date_input("De:", value=data_padrao_ini)
@@ -223,60 +243,90 @@ if df is not None and not df.empty:
             else:
                 tipos_filtro = []
 
-        # 2. CÁLCULO DOS DADOS
+        # 2. CÁLCULOS
         if not df_interacoes.empty:
+            # Garante que Data_Only é apenas data (sem hora) para comparação correta
             df_interacoes['Data_Only'] = df_interacoes['Data'].dt.date
+            
+            # Filtro Lógico Robusto
             mask_data = (df_interacoes['Data_Only'] >= data_inicio) & (df_interacoes['Data_Only'] <= data_fim)
-            df_periodo = df_interacoes[mask_data]
+            df_periodo = df_interacoes[mask_data].copy() # .copy() evita avisos do pandas
 
-            vlr_orcado = df_periodo[df_periodo['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum()
-            vlr_perdido = df_periodo[df_periodo['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum()
-            vlr_fechado = df_periodo[df_periodo['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum()
-            qtd_fechado = len(df_periodo[df_periodo['Tipo'] == 'Venda Fechada'])
-            qtd_atendimentos = len(df_periodo)
+            if not df_periodo.empty:
+                vlr_orcado = df_periodo[df_periodo['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum()
+                vlr_perdido = df_periodo[df_periodo['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum()
+                vlr_fechado = df_periodo[df_periodo['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum()
+                qtd_fechado = len(df_periodo[df_periodo['Tipo'] == 'Venda Fechada'])
+                qtd_atendimentos = len(df_periodo)
+            else:
+                vlr_orcado = vlr_perdido = vlr_fechado = 0.0
+                qtd_fechado = qtd_atendimentos = 0
         else:
             vlr_orcado = vlr_perdido = vlr_fechado = 0.0
             qtd_fechado = qtd_atendimentos = 0
             df_periodo = pd.DataFrame()
 
-        # 3. EXIBIÇÃO KPIs
+        # 3. KPIs COM FORMATAÇÃO BRASILEIRA
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("💰 Volume Orçado", f"R$ {vlr_orcado:,.2f}")
-        kpi2.metric("👎 Vendas Perdidas", f"R$ {vlr_perdido:,.2f}")
-        kpi3.metric("✅ Vendas Fechadas", f"R$ {vlr_fechado:,.2f}", f"{qtd_fechado} unid.")
+        kpi1.metric("💰 Volume Orçado", formatar_moeda(vlr_orcado))
+        kpi2.metric("👎 Vendas Perdidas", formatar_moeda(vlr_perdido))
+        kpi3.metric("✅ Vendas Fechadas", formatar_moeda(vlr_fechado), f"{qtd_fechado} contratos")
         kpi4.metric("📞 Interações", f"{qtd_atendimentos}")
 
         st.divider()
 
-        # 4. ABAS DE VISÃO
-        tab1, tab2, tab3 = st.tabs(["🏆 Ranking", "📝 Interações Detalhadas", "👥 Base de Clientes (Status)"])
+        # 4. ABAS DE VISUALIZAÇÃO
+        tab1, tab2, tab3 = st.tabs(["🏆 Ranking (Financeiro)", "📝 Histórico Detalhado", "👥 Base Completa"])
         
         with tab1:
             if not df_periodo.empty:
+                # Ranking agrupado
                 ranking = df_periodo.groupby('Vendedor').agg(
                     Orcamentos=('Tipo', lambda x: (x == 'Orçamento Enviado').sum()),
                     Fechados=('Tipo', lambda x: (x == 'Venda Fechada').sum()),
                     Vlr_Fechado=('Valor_Proposta', lambda x: x[df_periodo['Tipo'] == 'Venda Fechada'].sum()),
                     Vlr_Perdido=('Valor_Proposta', lambda x: x[df_periodo['Tipo'] == 'Venda Perdida'].sum())
                 ).reset_index().sort_values(by='Vlr_Fechado', ascending=False)
-                st.dataframe(ranking, use_container_width=True)
+                
+                # Aplica formatação visual apenas para exibir
+                ranking_view = ranking.copy()
+                ranking_view['Vlr_Fechado'] = ranking_view['Vlr_Fechado'].apply(formatar_moeda)
+                ranking_view['Vlr_Perdido'] = ranking_view['Vlr_Perdido'].apply(formatar_moeda)
+                
+                st.dataframe(ranking_view, use_container_width=True)
             else:
-                st.info("Sem dados no período.")
+                st.info("Sem movimentação financeira no período selecionado.")
 
         with tab2:
             if not df_periodo.empty:
-                df_tabela = df_periodo[df_periodo['Tipo'].isin(tipos_filtro)]
-                colunas_view = ['Data', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta', 'Vendedor']
-                cols_finais = [c for c in colunas_view if c in df_tabela.columns]
-                st.dataframe(df_tabela[cols_finais].sort_values(by='Data', ascending=False), use_container_width=True)
+                df_tabela = df_periodo[df_periodo['Tipo'].isin(tipos_filtro)].copy()
+                
+                if not df_tabela.empty:
+                    # Formata as colunas para exibição bonita
+                    df_tabela['Data_Formatada'] = df_tabela['Data'].apply(formatar_data)
+                    df_tabela['Valor_Formatado'] = df_tabela['Valor_Proposta'].apply(formatar_moeda)
+                    
+                    # Seleciona colunas finais (usando as formatadas)
+                    colunas_finais = df_tabela[['Data_Formatada', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Formatado', 'Vendedor']]
+                    # Renomeia para ficar bonito no cabeçalho
+                    colunas_finais.columns = ['Data', 'Cliente', 'Ação', 'Resumo', 'Valor (R$)', 'Vendedor']
+                    
+                    st.dataframe(colunas_finais, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Nenhum registro encontrado para esse Tipo de Ação.")
             else:
-                st.info("Sem interações.")
+                st.info("Sem interações no período.")
 
         with tab3:
-            # NOVA ABA: Para o Gestor ver os clientes, mesmo sem interação
-            st.subheader("Visão Geral da Carteira")
-            col_sel = ['Nome_Fantasia', 'ID_Cliente_CNPJ_CPF', 'Ultimo_Vendedor', 'Status', 'Data_Ultima_Compra', 'Telefone_Contato1']
-            st.dataframe(df[col_sel], use_container_width=True)
+            st.subheader("Base de Clientes")
+            # Exibe a base completa tratada
+            if not df.empty:
+                df_view = df.copy()
+                df_view['Data_Ultima_Compra'] = df_view['Data_Ultima_Compra'].apply(formatar_data)
+                df_view['Total_Compras'] = df_view['Total_Compras'].apply(formatar_moeda)
+                
+                cols = ['Nome_Fantasia', 'ID_Cliente_CNPJ_CPF', 'Ultimo_Vendedor', 'Status', 'Data_Ultima_Compra', 'Total_Compras']
+                st.dataframe(df_view[cols], use_container_width=True)
 
     # --- ÁREA VENDEDOR ---
     else:
@@ -305,18 +355,12 @@ if df is not None and not df.empty:
                     dados = meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cliente_id].iloc[0]
                     with st.container(border=True):
                         st.markdown(f"### {dados['Nome_Fantasia']}")
-                        
-                        # CNPJ ADICIONADO AQUI
                         st.caption(f"🆔 CNPJ/CPF: {dados['ID_Cliente_CNPJ_CPF']}")
-                        
                         st.info(f"Status: **{dados['Status']}**")
 
                         c1, c2 = st.columns(2)
                         c1.write(f"📞 {dados['Telefone_Contato1']}")
-                        if pd.notna(dados['Data_Ultima_Compra']):
-                            c2.write(f"📅 Última Compra: **{dados['Data_Ultima_Compra'].strftime('%d/%m/%Y')}**")
-                        else:
-                            c2.write("📅 Última Compra: **Nunca / Novo**")
+                        c2.write(f"📅 Última Compra: **{formatar_data(dados['Data_Ultima_Compra'])}**")
                         
                         st.divider()
                         
