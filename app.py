@@ -6,13 +6,13 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 7.2", layout="wide")
+st.set_page_config(page_title="CRM Master 7.3", layout="wide")
 
 # --- MENSAGEM DE CARREGAMENTO ---
 placeholder = st.empty()
 placeholder.info("⏳ Carregando sistema...")
 
-# --- FUNÇÕES VISUAIS ---
+# --- FUNÇÕES VISUAIS E FORMATAÇÃO ---
 def formatar_moeda_visual(valor):
     if pd.isna(valor) or str(valor).strip() == '': return "R$ 0,00"
     try:
@@ -29,6 +29,26 @@ def limpar_valor_monetario(valor):
         elif ',' in s: s = s.replace(',', '.')
         try: return float(s)
         except: return 0.0
+
+def formatar_documento(valor):
+    """Aplica máscara de CPF (até 11 dígitos) ou CNPJ (>11 dígitos)"""
+    if pd.isna(valor) or str(valor).strip() == '': return "-"
+    
+    # Deixa apenas números
+    doc = ''.join(filter(str.isdigit, str(valor)))
+    
+    if not doc: return "-"
+
+    # Lógica da Máscara
+    if len(doc) > 11:
+        # CNPJ: 14 dígitos (XX.XXX.XXX/XXXX-XX)
+        # Se vier menor que 14, preenche com zeros a esquerda para evitar erro
+        doc = doc.zfill(14)
+        return f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
+    else:
+        # CPF: 11 dígitos (XXX.XXX.XXX-XX)
+        doc = doc.zfill(11)
+        return f"{doc[:3]}.{doc[3:6]}.{doc[6:9]}-{doc[9:]}"
 
 # --- CONEXÃO ---
 def conectar_google_sheets():
@@ -84,7 +104,6 @@ def carregar_dados_completos():
                 else: df_interacoes['Valor_Proposta'] = 0.0
                 
                 if 'Data' in df_interacoes.columns:
-                    # Tenta converter garantindo dayfirst=True (DD/MM/AAAA)
                     df_interacoes['Data_Obj'] = pd.to_datetime(df_interacoes['Data'], dayfirst=True, errors='coerce').dt.date
                 
                 if 'CNPJ_Cliente' in df_interacoes.columns:
@@ -174,7 +193,7 @@ try:
     placeholder.empty()
 
     if df is not None and not df.empty:
-        st.sidebar.title("🚀 CRM Master 7.2")
+        st.sidebar.title("🚀 CRM Master 7.3")
         hoje = datetime.now().date()
         
         if 'Data_Ultima_Compra' in df.columns:
@@ -247,7 +266,6 @@ try:
 
             with st.container(border=True):
                 col_f1, col_f2, col_f3 = st.columns(3)
-                # FILTRO COM FORMATO FORÇADO DD/MM/YYYY
                 d_ini = col_f1.date_input("De:", value=hoje - timedelta(days=30), format="DD/MM/YYYY")
                 d_fim = col_f2.date_input("Até:", value=hoje, format="DD/MM/YYYY")
                 opcoes_tipo = df_interacoes['Tipo'].unique().tolist() if not df_interacoes.empty else []
@@ -297,17 +315,12 @@ try:
                     view = df_tabela[['Data_Obj', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta', 'Vendedor']].copy()
                     view['Valor_Proposta'] = view['Valor_Proposta'].apply(formatar_moeda_visual)
                     view.rename(columns={'Data_Obj': 'Data'}, inplace=True)
-                    
-                    # CONFIGURAÇÃO AVANÇADA DE COLUNA PARA FORÇAR DATA BRASILEIRA
                     st.dataframe(
                         view, 
                         use_container_width=True, 
                         hide_index=True,
                         column_config={
-                            "Data": st.column_config.DateColumn(
-                                "Data",
-                                format="DD/MM/YYYY" # Força visual brasileiro
-                            )
+                            "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")
                         }
                     )
                 else: st.info("Nenhuma interação.")
@@ -345,7 +358,10 @@ try:
                         cli = meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cid].iloc[0]
                         with st.container(border=True):
                             st.markdown(f"### {cli['Nome_Fantasia']}")
-                            st.caption(f"CNPJ: {cli['ID_Cliente_CNPJ_CPF']}")
+                            # APLICAÇÃO DA MÁSCARA AQUI
+                            doc_fmt = formatar_documento(cli['ID_Cliente_CNPJ_CPF'])
+                            st.caption(f"CNPJ/CPF: {doc_fmt}")
+                            
                             st.info(f"Status: **{cli['Status']}**")
                             
                             c1, c2 = st.columns(2)
