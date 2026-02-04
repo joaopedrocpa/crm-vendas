@@ -5,12 +5,12 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 
-# --- CONFIGURAÇÃO (Deve ser a primeira linha executável do Streamlit) ---
-st.set_page_config(page_title="CRM Master 6.0", layout="wide")
+# --- CONFIGURAÇÃO ---
+st.set_page_config(page_title="CRM Master 6.1", layout="wide")
 
-# --- MENSAGEM DE CARREGAMENTO (Para você saber que o sistema ligou) ---
-placeholder_loading = st.empty()
-placeholder_loading.info("⏳ Iniciando o Sistema... Se esta mensagem aparecer, o código está rodando!")
+# --- MENSAGEM DE CARREGAMENTO ---
+placeholder = st.empty()
+placeholder.info("⏳ Iniciando sistema...")
 
 # --- FUNÇÕES DE LIMPEZA E FORMATAÇÃO ---
 def formatar_moeda(valor):
@@ -20,25 +20,17 @@ def formatar_moeda(valor):
     except: return str(valor)
 
 def limpar_valor_monetario(valor):
-    """Transforma qualquer formato (R$ 1.000,00 ou 1000.00) em float puro"""
     if pd.isna(valor): return 0.0
     s = str(valor).strip()
     s = s.replace('R$', '').strip()
     if ',' in s and '.' in s:
-        s = s.replace('.', '').replace(',', '.') # Padrão BR 1.000,00 vira 1000.00
+        s = s.replace('.', '').replace(',', '.')
     elif ',' in s:
         s = s.replace(',', '.')
     try:
         return float(s)
     except:
         return 0.0
-
-def converter_data_br(data_str):
-    """Converte string ou datetime para data pura (sem hora)"""
-    try:
-        return pd.to_datetime(data_str, dayfirst=True).date()
-    except:
-        return None
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def conectar_google_sheets():
@@ -65,7 +57,6 @@ def carregar_dados_completos():
             sheet_clientes = spreadsheet.worksheet("Clientes")
             df_protheus = pd.DataFrame(sheet_clientes.get_all_records())
         except:
-            st.error("Erro: Aba 'Clientes' não encontrada na planilha.")
             return None, None, None
         
         # 2. Leads
@@ -78,7 +69,6 @@ def carregar_dados_completos():
             
         # 3. Join
         if not df_leads.empty:
-            # Garante que as colunas batem forçando string
             df_leads = df_leads.astype(str)
             df_protheus = df_protheus.astype(str)
             df_clientes = pd.concat([df_protheus, df_leads], ignore_index=True)
@@ -87,9 +77,7 @@ def carregar_dados_completos():
 
         # Tratamento Clientes
         if not df_clientes.empty:
-            # Limpeza de espaços nos nomes das colunas
             df_clientes.columns = df_clientes.columns.str.strip()
-            
             df_clientes['ID_Cliente_CNPJ_CPF'] = df_clientes['ID_Cliente_CNPJ_CPF'].astype(str)
             
             if 'Total_Compras' in df_clientes.columns:
@@ -106,19 +94,15 @@ def carregar_dados_completos():
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
             
             if not df_interacoes.empty:
-                # Limpeza Robusta
                 if 'Valor_Proposta' in df_interacoes.columns:
                     df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].apply(limpar_valor_monetario)
                 else:
                     df_interacoes['Valor_Proposta'] = 0.0
                 
-                # Converte para data pura
                 if 'Data' in df_interacoes.columns:
                     df_interacoes['Data_Obj'] = pd.to_datetime(df_interacoes['Data'], dayfirst=True, errors='coerce').dt.date
                 
-                # Mapeia Nomes
                 if 'CNPJ_Cliente' in df_interacoes.columns:
-                    # Cria dicionário garantindo que CNPJ é string
                     mapa_nomes = dict(zip(df_clientes['ID_Cliente_CNPJ_CPF'].astype(str), df_clientes['Nome_Fantasia']))
                     df_interacoes['CNPJ_Cliente'] = df_interacoes['CNPJ_Cliente'].astype(str)
                     df_interacoes['Nome_Cliente'] = df_interacoes['CNPJ_Cliente'].map(mapa_nomes).fillna("Cliente da Carteira")
@@ -143,7 +127,6 @@ def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor=0.0):
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
         
-        # Formata Data e Valor
         data_str = data_obj.strftime('%d/%m/%Y')
         valor_str = f"{valor:.2f}".replace('.', ',')
         
@@ -177,41 +160,37 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
 try:
     df, df_interacoes, df_config = carregar_dados_completos()
     
-    # Remove mensagem de loading se carregou
-    placeholder_loading.empty()
+    placeholder.empty() # Remove mensagem de carregamento
 
     if df is not None and not df.empty:
-        # --- INTERFACE ---
-        st.sidebar.title("🚀 CRM Master 6.0")
-        
+        # --- MENU LATERAL ---
+        st.sidebar.title("🚀 CRM Master 6.1")
         hoje = datetime.now().date()
         
-        # Tratamento seguro de datas
         if 'Data_Ultima_Compra' in df.columns:
             df['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df['Data_Ultima_Compra']).dt.days
         else:
             df['Dias_Sem_Comprar'] = 0
 
-        # --- FUNÇÃO STATUS ---
+        # Status
         def calcular_status(linha):
             cnpj = linha['ID_Cliente_CNPJ_CPF']
             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                 cnpj_str = str(cnpj)
                 filtro = df_interacoes[df_interacoes['CNPJ_Cliente'] == cnpj_str]
-                if not filtro.empty:
-                    if 'Data_Obj' in filtro.columns:
-                        filtro = filtro.sort_values(by='Data_Obj')
-                        ultima = filtro.iloc[-1]
-                        try:
-                            if pd.notna(ultima['Data_Obj']):
-                                dias_acao = (hoje - ultima['Data_Obj']).days
-                                if ultima['Tipo'] == 'Orçamento Enviado':
-                                    return '⚠️ FOLLOW-UP' if dias_acao >= 5 else '⏳ NEGOCIAÇÃO'
-                                if ultima['Tipo'] == 'Venda Fechada': return '⭐ VENDA RECENTE'
-                                if ultima['Tipo'] == 'Venda Perdida': return '👎 VENDA PERDIDA'
-                                if ultima['Tipo'] == 'Ligação Realizada': return '📞 CONTATADO RECENTEMENTE'
-                                if ultima['Tipo'] == 'WhatsApp Enviado': return '💬 WHATSAPP INICIADO'
-                        except: pass
+                if not filtro.empty and 'Data_Obj' in filtro.columns:
+                    filtro = filtro.sort_values(by='Data_Obj')
+                    ultima = filtro.iloc[-1]
+                    try:
+                        if pd.notna(ultima['Data_Obj']):
+                            dias_acao = (hoje - ultima['Data_Obj']).days
+                            if ultima['Tipo'] == 'Orçamento Enviado':
+                                return '⚠️ FOLLOW-UP' if dias_acao >= 5 else '⏳ NEGOCIAÇÃO'
+                            if ultima['Tipo'] == 'Venda Fechada': return '⭐ VENDA RECENTE'
+                            if ultima['Tipo'] == 'Venda Perdida': return '👎 VENDA PERDIDA'
+                            if ultima['Tipo'] == 'Ligação Realizada': return '📞 CONTATADO RECENTEMENTE'
+                            if ultima['Tipo'] == 'WhatsApp Enviado': return '💬 WHATSAPP INICIADO'
+                    except: pass
             
             if pd.isna(linha['Dias_Sem_Comprar']): return '🆕 NOVO S/ INTERAÇÃO'
             if linha['Dias_Sem_Comprar'] >= 60: return '🔴 RECUPERAR'
@@ -219,7 +198,7 @@ try:
 
         df['Status'] = df.apply(calcular_status, axis=1)
 
-        # --- LOGIN ---
+        # Login
         if df_config.empty:
             if 'Ultimo_Vendedor' in df.columns:
                 usuarios_disponiveis = df['Ultimo_Vendedor'].dropna().unique().tolist()
@@ -231,11 +210,11 @@ try:
 
         usuario_logado = st.sidebar.selectbox("Usuário:", usuarios_disponiveis)
 
-        # --- CADASTRO LEAD ---
+        # Cadastro Lead
         if usuario_logado != "GESTOR":
             st.sidebar.markdown("---")
             with st.sidebar.expander("➕ Cadastrar Novo Lead"):
-                # Inicializa Session State
+                # Session States para limpar campos
                 if "novo_nome" not in st.session_state: st.session_state["novo_nome"] = ""
                 if "novo_doc" not in st.session_state: st.session_state["novo_doc"] = ""
                 if "novo_contato" not in st.session_state: st.session_state["novo_contato"] = ""
@@ -264,13 +243,13 @@ try:
                     else:
                         if salvar_novo_lead_completo(doc, nome, contato, tel, usuario_logado, origem, acao, resumo, val):
                             st.success("Lead Salvo!")
-                            # Limpa Session State
-                            for key in ["novo_nome", "novo_doc", "novo_contato", "novo_tel", "novo_resumo"]:
-                                st.session_state[key] = ""
+                            # Limpeza
+                            for k in ["novo_nome", "novo_doc", "novo_contato", "novo_tel", "novo_resumo"]:
+                                st.session_state[k] = ""
                             st.session_state["novo_val"] = 0.0
                             st.rerun()
 
-        # --- PERMISSÕES ---
+        # Permissões
         if usuario_logado == "GESTOR":
             meus_clientes = df
         else:
@@ -299,25 +278,34 @@ try:
 
             with st.container(border=True):
                 col_f1, col_f2, col_f3 = st.columns(3)
-                ini_padrao = hoje - timedelta(days=30)
-                
-                d_ini = col_f1.date_input("De:", value=ini_padrao, format="DD/MM/YYYY")
+                # Filtro: 30 dias
+                d_ini = col_f1.date_input("De:", value=hoje - timedelta(days=30), format="DD/MM/YYYY")
                 d_fim = col_f2.date_input("Até:", value=hoje, format="DD/MM/YYYY")
                 
                 opcoes_tipo = df_interacoes['Tipo'].unique().tolist() if not df_interacoes.empty else []
                 tipos_sel = col_f3.multiselect("Filtrar Tipos:", options=opcoes_tipo, default=opcoes_tipo)
 
-            # CÁLCULOS
+            # --- CÁLCULOS E RANKING ---
             if not df_interacoes.empty and 'Data_Obj' in df_interacoes.columns:
+                # 1. Filtra Data
                 mask_data = (df_interacoes['Data_Obj'] >= d_ini) & (df_interacoes['Data_Obj'] <= d_fim)
-                df_filtered = df_interacoes[mask_data]
+                df_filtered = df_interacoes[mask_data].copy()
+
+                # 2. Cria colunas auxiliares para evitar erro de lambda e SyntaxError
+                df_filtered['Is_Orcamento'] = (df_filtered['Tipo'] == 'Orçamento Enviado').astype(int)
+                df_filtered['Is_Fechado'] = (df_filtered['Tipo'] == 'Venda Fechada').astype(int)
                 
+                # Para somar valores condicionalmente de forma segura
+                df_filtered['Vlr_Fechado_Aux'] = df_filtered.apply(lambda x: x['Valor_Proposta'] if x['Tipo'] == 'Venda Fechada' else 0.0, axis=1)
+
+                # Tabela de visualização (Filtra Tipo)
                 df_tabela = df_filtered[df_filtered['Tipo'].isin(tipos_sel)]
                 
+                # KPIs Gerais
                 vlr_orcado = df_filtered[df_filtered['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum()
                 vlr_perdido = df_filtered[df_filtered['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum()
                 vlr_fechado = df_filtered[df_filtered['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum()
-                qtd_fechado = len(df_filtered[df_filtered['Tipo'] == 'Venda Fechada'])
+                qtd_fechado = df_filtered['Is_Fechado'].sum()
                 qtd_total = len(df_filtered)
             else:
                 vlr_orcado = vlr_perdido = vlr_fechado = 0.0
@@ -336,13 +324,15 @@ try:
             t1, t2 = st.tabs(["🏆 Ranking", "📝 Detalhes"])
             with t1:
                 if not df_filtered.empty:
+                    # Agrupamento Seguro (Sem variáveis com $)
                     ranking = df_filtered.groupby('Vendedor').agg(
-                        Orcamentos=('Tipo', lambda x: (x == 'Orçamento Enviado').sum()),
-                        Fechados=('Tipo', lambda x: (x == 'Venda Fechada').sum()),
-                        R$_Fechado=('Valor_Proposta', lambda x: x[df_filtered['Tipo'] == 'Venda Fechada'].sum())
-                    ).reset_index().sort_values('R$_Fechado', ascending=False)
+                        Qtd_Orcamentos=('Is_Orcamento', 'sum'),
+                        Qtd_Fechados=('Is_Fechado', 'sum'),
+                        Valor_Fechado_Total=('Vlr_Fechado_Aux', 'sum')
+                    ).reset_index().sort_values('Valor_Fechado_Total', ascending=False)
                     
-                    ranking['R$_Fechado'] = ranking['R$_Fechado'].apply(formatar_moeda)
+                    # Formatação Visual
+                    ranking['Valor_Fechado_Total'] = ranking['Valor_Fechado_Total'].apply(formatar_moeda)
                     st.dataframe(ranking, use_container_width=True)
                 else:
                     st.info("Sem dados no período.")
@@ -356,7 +346,7 @@ try:
                 else:
                     st.info("Nenhuma interação encontrada.")
 
-        # --- VENDEDOR ---
+        # --- PAINEL VENDEDOR ---
         else:
             st.title(f"Área: {usuario_logado}")
             
@@ -385,6 +375,7 @@ try:
                             st.caption(f"CNPJ: {cli['ID_Cliente_CNPJ_CPF']}")
                             st.info(f"Status: **{cli['Status']}**")
                             
+                            # Histórico Recente
                             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                                 hist = df_interacoes[df_interacoes['CNPJ_Cliente'] == str(cid)].sort_values('Data_Obj', ascending=False)
                                 if not hist.empty:
@@ -394,7 +385,7 @@ try:
 
                             st.divider()
                             
-                            # Session State para limpeza do formulário de ação
+                            # Form Action (Session State)
                             if "obs_temp" not in st.session_state: st.session_state["obs_temp"] = ""
                             if "val_temp" not in st.session_state: st.session_state["val_temp"] = 0.0
                             
@@ -412,9 +403,6 @@ try:
                                     st.session_state["obs_temp"] = ""
                                     st.session_state["val_temp"] = 0.0
                                     st.rerun()
-
-    else:
-        st.warning("Carregando base de dados...")
 
 except Exception as e:
     st.error(f"Erro Fatal no Sistema: {e}")
