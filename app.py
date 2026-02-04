@@ -6,7 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 5.0", layout="wide")
+st.set_page_config(page_title="CRM Master 5.1", layout="wide")
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def conectar_google_sheets():
@@ -49,11 +49,9 @@ def carregar_dados_completos():
         # Tratamento
         if not df_clientes.empty:
             df_clientes['ID_Cliente_CNPJ_CPF'] = df_clientes['ID_Cliente_CNPJ_CPF'].astype(str)
-            
             if df_clientes['Total_Compras'].dtype == 'object':
                 df_clientes['Total_Compras'] = df_clientes['Total_Compras'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
                 df_clientes['Total_Compras'] = pd.to_numeric(df_clientes['Total_Compras'], errors='coerce')
-            
             df_clientes['Data_Ultima_Compra'] = pd.to_datetime(df_clientes['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
 
         # 4. Interações
@@ -62,14 +60,17 @@ def carregar_dados_completos():
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
             
             if not df_interacoes.empty:
+                # Tratamento de Valor (Limpeza robusta)
                 if 'Valor_Proposta' in df_interacoes.columns:
                     df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].astype(str).str.replace('R$', '', regex=False).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
                     df_interacoes['Valor_Proposta'] = pd.to_numeric(df_interacoes['Valor_Proposta'], errors='coerce').fillna(0)
+                else:
+                    df_interacoes['Valor_Proposta'] = 0.0
                 
-                # Garante formato de data
+                # Tratamento de Data
                 df_interacoes['Data'] = pd.to_datetime(df_interacoes['Data'], dayfirst=True, errors='coerce')
                 
-                # Cruzamento de Nomes
+                # Mapeamento de Nomes
                 mapa_nomes = dict(zip(df_clientes['ID_Cliente_CNPJ_CPF'], df_clientes['Nome_Fantasia']))
                 df_interacoes['CNPJ_Cliente'] = df_interacoes['CNPJ_Cliente'].astype(str)
                 df_interacoes['Nome_Cliente'] = df_interacoes['CNPJ_Cliente'].map(mapa_nomes).fillna("Desconhecido")
@@ -120,7 +121,7 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         return False
 
 # --- INTERFACE ---
-st.sidebar.title("🚀 CRM Master 5.0")
+st.sidebar.title("🚀 CRM Master 5.1")
 
 df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -146,7 +147,6 @@ if df is not None and not df.empty:
                         if ultima['Tipo'] == 'Ligação Realizada': return '📞 CONTATADO RECENTEMENTE'
                         if ultima['Tipo'] == 'WhatsApp Enviado': return '💬 WHATSAPP INICIADO'
                 except: pass
-        
         if pd.isna(linha['Dias_Sem_Comprar']): return '🆕 NOVO S/ INTERAÇÃO'
         if linha['Dias_Sem_Comprar'] >= 60: return '🔴 RECUPERAR'
         return '🟢 ATIVO'
@@ -162,11 +162,10 @@ if df is not None and not df.empty:
 
     usuario_logado = st.sidebar.selectbox("Usuário:", usuarios_disponiveis)
 
-    # --- CADASTRO LEAD (SEM FORMULÁRIO TRAVADO) ---
+    # --- CADASTRO LEAD ---
     if usuario_logado != "GESTOR":
         st.sidebar.markdown("---")
         with st.sidebar.expander("➕ Cadastrar Novo Lead"):
-            # Removemos st.form para ter interatividade
             st.write("**Dados do Cliente**")
             novo_nome = st.text_input("Nome da Empresa/Cliente")
             novo_cnpj = st.text_input("CPF ou CNPJ (Só números)")
@@ -178,7 +177,6 @@ if df is not None and not df.empty:
             nova_origem = c1.selectbox("Origem:", ["SELECIONE...", "SZ.CHAT", "LIGAÇÃO", "PRESENCIAL", "E-MAIL", "INDICAÇÃO"])
             primeira_acao = c2.selectbox("Ação Inicial:", ["SELECIONE...", "Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
             
-            # Campo de Valor aparece na hora
             valor_inicial = 0.0
             if primeira_acao == "Orçamento Enviado":
                 valor_inicial = st.number_input("Valor do Orçamento (R$):", min_value=0.0, step=100.0, key="vlr_lead")
@@ -187,10 +185,10 @@ if df is not None and not df.empty:
             
             if st.button("💾 SALVAR LEAD", type="primary"):
                 if not novo_nome or not novo_cnpj or nova_origem == "SELECIONE..." or primeira_acao == "SELECIONE...":
-                    st.error("Preencha todos os campos obrigatórios!")
+                    st.error("Preencha campos obrigatórios!")
                 else:
                     if salvar_novo_lead_completo(novo_cnpj, novo_nome, novo_contato, novo_tel, usuario_logado, nova_origem, primeira_acao, novo_resumo, valor_inicial):
-                        st.success("Salvo com sucesso!")
+                        st.success("Salvo!")
                         st.rerun()
 
     # --- PERMISSÕES ---
@@ -201,8 +199,7 @@ if df is not None and not df.empty:
             regra = df_config[df_config['Usuario_Login'] == usuario_logado]
             if not regra.empty:
                 carteiras = regra.iloc[0]['Carteiras_Visiveis']
-                if "TODOS" in carteiras.upper(): 
-                    meus_clientes = df 
+                if "TODOS" in carteiras.upper(): meus_clientes = df 
                 else:
                     lista = [n.strip() for n in carteiras.split(',')]
                     meus_clientes = df[df['Ultimo_Vendedor'].isin(lista)]
@@ -211,69 +208,97 @@ if df is not None and not df.empty:
         else:
             meus_clientes = df[df['Ultimo_Vendedor'] == usuario_logado]
 
-    # --- PAINEL DO GESTOR (COM FILTROS E RANKING) ---
+    # --- PAINEL GESTOR (CORRIGIDO) ---
     if usuario_logado == "GESTOR":
         st.title("📊 Painel Financeiro e Performance")
-        
-        # --- FILTROS DE DATA E TIPO ---
+
+        # 1. ÁREA DE FILTROS
         with st.container(border=True):
+            st.caption("Filtre o período e o tipo de ação para ver os KPIs")
             col_f1, col_f2, col_f3 = st.columns(3)
+            # Default: Inicio do mês atual até hoje
+            data_padrao_ini = hoje.replace(day=1)
             
-            # Filtro de Data
-            data_inicio = col_f1.date_input("De:", value=hoje.replace(day=1)) # Padrão: dia 1 do mês
+            data_inicio = col_f1.date_input("De:", value=data_padrao_ini)
             data_fim = col_f2.date_input("Até:", value=hoje)
             
-            # Filtro de Tipo
-            tipos_disponiveis = df_interacoes['Tipo'].unique().tolist()
-            tipos_filtro = col_f3.multiselect("Filtrar Tipo:", options=tipos_disponiveis, default=tipos_disponiveis)
-        
-        # APLICAÇÃO DOS FILTROS
+            if not df_interacoes.empty:
+                tipos_disp = df_interacoes['Tipo'].unique().tolist()
+                tipos_filtro = col_f3.multiselect("Tipos:", tipos_disp, default=tipos_disp)
+            else:
+                tipos_filtro = []
+
+        # 2. PROCESSAMENTO DOS DADOS FILTRADOS
         if not df_interacoes.empty:
-            # Filtra Data (Converte coluna Data para datetime64[ns] para comparar com date)
-            mask_data = (df_interacoes['Data'].dt.date >= data_inicio) & (df_interacoes['Data'].dt.date <= data_fim)
-            # Filtra Tipo
-            mask_tipo = df_interacoes['Tipo'].isin(tipos_filtro)
+            # Filtro de Data
+            df_interacoes['Data_Only'] = df_interacoes['Data'].dt.date
+            mask_data = (df_interacoes['Data_Only'] >= data_inicio) & (df_interacoes['Data_Only'] <= data_fim)
+            df_periodo = df_interacoes[mask_data] # Dados apenas do período
             
-            df_filtrado = df_interacoes[mask_data & mask_tipo]
+            # Filtro de Tipo (Apenas para a tabela e gráficos, NÃO para os KPIs gerais se não quiser)
+            # Mas geralmente KPIs obedecem o filtro de data rigorosamente
+            
+            # CÁLCULO DOS KPIs (Baseado no Período Selecionado)
+            
+            # Valor em Aberto (Soma de orçamentos enviados)
+            vlr_orcado = df_periodo[df_periodo['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum()
+            
+            # Valor Perdido
+            vlr_perdido = df_periodo[df_periodo['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum()
+            
+            # Valor Fechado
+            vlr_fechado = df_periodo[df_periodo['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum()
+            qtd_fechado = len(df_periodo[df_periodo['Tipo'] == 'Venda Fechada'])
+            
+            # Total de Atendimentos (Qualquer interação no período)
+            qtd_atendimentos = len(df_periodo)
+
         else:
-            df_filtrado = pd.DataFrame()
+            vlr_orcado = 0.0
+            vlr_perdido = 0.0
+            vlr_fechado = 0.0
+            qtd_fechado = 0
+            qtd_atendimentos = 0
+            df_periodo = pd.DataFrame()
+
+        # 3. EXIBIÇÃO DOS KPIs (AGORA FIXOS E VISÍVEIS)
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        
+        kpi1.metric("💰 Volume Orçado", f"R$ {vlr_orcado:,.2f}", help="Soma dos orçamentos enviados no período")
+        kpi2.metric("👎 Vendas Perdidas", f"R$ {vlr_perdido:,.2f}", help="Soma das vendas perdidas no período")
+        kpi3.metric("✅ Vendas Fechadas", f"R$ {vlr_fechado:,.2f}", f"{qtd_fechado} contratos")
+        kpi4.metric("📞 Vol. Atendimentos", f"{qtd_atendimentos}", help="Total de interações registradas")
 
         st.divider()
 
-        # --- RANKING E KPI ---
-        tab1, tab2 = st.tabs(["🏆 Ranking de Vendedores", "📝 Lista de Interações"])
+        # 4. RANKING E TABELA
+        tab1, tab2 = st.tabs(["🏆 Ranking de Vendedores", "📝 Detalhe das Interações"])
         
         with tab1:
-            if not df_filtrado.empty:
-                # Agrupamento Inteligente
-                ranking = df_filtrado.groupby('Vendedor').agg(
-                    Orcamentos_Qtd=('Tipo', lambda x: (x == 'Orçamento Enviado').sum()),
-                    Vendas_Fechadas_Qtd=('Tipo', lambda x: (x == 'Venda Fechada').sum()),
-                    Vendas_Fechadas_Valor=('Valor_Proposta', lambda x: x[df_filtrado['Tipo'] == 'Venda Fechada'].sum()),
-                    Vendas_Perdidas_Valor=('Valor_Proposta', lambda x: x[df_filtrado['Tipo'] == 'Venda Perdida'].sum())
-                ).reset_index()
-                
-                # Ordena por Faturamento
-                ranking = ranking.sort_values(by='Vendas_Fechadas_Valor', ascending=False)
+            if not df_periodo.empty:
+                ranking = df_periodo.groupby('Vendedor').agg(
+                    Orcamentos_Feitos=('Tipo', lambda x: (x == 'Orçamento Enviado').sum()),
+                    Vendas_Qtd=('Tipo', lambda x: (x == 'Venda Fechada').sum()),
+                    Vendas_Valor=('Valor_Proposta', lambda x: x[df_periodo['Tipo'] == 'Venda Fechada'].sum()),
+                    Perdidas_Valor=('Valor_Proposta', lambda x: x[df_periodo['Tipo'] == 'Venda Perdida'].sum())
+                ).reset_index().sort_values(by='Vendas_Valor', ascending=False)
                 
                 st.dataframe(ranking, use_container_width=True)
-                
-                # Totais do Período
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Total Faturado (Período)", f"R$ {ranking['Vendas_Fechadas_Valor'].sum():,.2f}")
-                c2.metric("Total Perdido (Período)", f"R$ {ranking['Vendas_Perdidas_Valor'].sum():,.2f}")
-                c3.metric("Total de Orçamentos", f"{ranking['Orcamentos_Qtd'].sum()}")
             else:
-                st.info("Sem dados para o período selecionado.")
+                st.info("Sem dados neste período.")
 
         with tab2:
-            st.subheader("Detalhe das Interações")
-            colunas_view = ['Data', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta', 'Vendedor']
-            # Garante que as colunas existem antes de mostrar
-            cols_finais = [c for c in colunas_view if c in df_filtrado.columns]
-            st.dataframe(df_filtrado[cols_finais].sort_values(by='Data', ascending=False), use_container_width=True)
-        
-    # --- ÁREA DO VENDEDOR ---
+            if not df_periodo.empty:
+                # Aplica o filtro de TIPO apenas na visualização da tabela
+                df_tabela = df_periodo[df_periodo['Tipo'].isin(tipos_filtro)]
+                
+                colunas_view = ['Data', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta', 'Vendedor']
+                cols_finais = [c for c in colunas_view if c in df_tabela.columns]
+                st.dataframe(df_tabela[cols_finais].sort_values(by='Data', ascending=False), use_container_width=True)
+            else:
+                st.info("Sem dados.")
+
+    # --- ÁREA VENDEDOR (SEM MUDANÇAS) ---
     else:
         st.title(f"Área: {usuario_logado}")
         
@@ -302,10 +327,8 @@ if df is not None and not df.empty:
                         st.markdown(f"### {dados['Nome_Fantasia']}")
                         st.info(f"Status: **{dados['Status']}**")
 
-                        # CORREÇÃO: Exibição da Data da Última Compra
                         c1, c2 = st.columns(2)
                         c1.write(f"📞 {dados['Telefone_Contato1']}")
-                        
                         if pd.notna(dados['Data_Ultima_Compra']):
                             c2.write(f"📅 Última Compra: **{dados['Data_Ultima_Compra'].strftime('%d/%m/%Y')}**")
                         else:
@@ -313,12 +336,9 @@ if df is not None and not df.empty:
                         
                         st.divider()
                         
-                        # REMOVIDO ST.FORM PARA PERMITIR VALOR APARECER NA HORA
                         st.write("📝 **Registrar Atividade**")
-                        
                         tipo = st.selectbox("Nova Ação", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Venda Fechada", "Venda Perdida", "Agendou Visita"], key="sel_acao")
                         
-                        # CAMPO CONDICIONAL (Aparece instantaneamente agora)
                         valor_acao = 0.0
                         if tipo == "Orçamento Enviado":
                             st.markdown("**💲 Valor da Proposta?**")
@@ -330,7 +350,6 @@ if df is not None and not df.empty:
 
                         obs = st.text_area("Obs:", key="obs_acao")
                         
-                        # Botão normal (fora de form)
                         if st.button("✅ Salvar Histórico", type="primary"):
                             if salvar_interacao_nuvem(cliente_id, datetime.now(), tipo, obs, usuario_logado, valor_acao):
                                 st.success("Salvo!")
