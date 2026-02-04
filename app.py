@@ -6,7 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 5.1", layout="wide")
+st.set_page_config(page_title="CRM Master 5.2", layout="wide")
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def conectar_google_sheets():
@@ -60,21 +60,17 @@ def carregar_dados_completos():
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
             
             if not df_interacoes.empty:
-                # Tratamento de Valor (Limpeza robusta)
                 if 'Valor_Proposta' in df_interacoes.columns:
                     df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].astype(str).str.replace('R$', '', regex=False).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
                     df_interacoes['Valor_Proposta'] = pd.to_numeric(df_interacoes['Valor_Proposta'], errors='coerce').fillna(0)
                 else:
                     df_interacoes['Valor_Proposta'] = 0.0
                 
-                # Tratamento de Data
                 df_interacoes['Data'] = pd.to_datetime(df_interacoes['Data'], dayfirst=True, errors='coerce')
                 
-                # Mapeamento de Nomes
                 mapa_nomes = dict(zip(df_clientes['ID_Cliente_CNPJ_CPF'], df_clientes['Nome_Fantasia']))
                 df_interacoes['CNPJ_Cliente'] = df_interacoes['CNPJ_Cliente'].astype(str)
                 df_interacoes['Nome_Cliente'] = df_interacoes['CNPJ_Cliente'].map(mapa_nomes).fillna("Desconhecido")
-                
         except:
             df_interacoes = pd.DataFrame(columns=['CNPJ_Cliente', 'Data', 'Tipo', 'Resumo', 'Vendedor', 'Valor_Proposta'])
 
@@ -121,7 +117,7 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         return False
 
 # --- INTERFACE ---
-st.sidebar.title("🚀 CRM Master 5.1")
+st.sidebar.title("🚀 CRM Master 5.2")
 
 df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -208,97 +204,81 @@ if df is not None and not df.empty:
         else:
             meus_clientes = df[df['Ultimo_Vendedor'] == usuario_logado]
 
-    # --- PAINEL GESTOR (CORRIGIDO) ---
+    # --- PAINEL GESTOR ---
     if usuario_logado == "GESTOR":
-        st.title("📊 Painel Financeiro e Performance")
+        st.title("📊 Painel Geral & Financeiro")
 
         # 1. ÁREA DE FILTROS
         with st.container(border=True):
-            st.caption("Filtre o período e o tipo de ação para ver os KPIs")
             col_f1, col_f2, col_f3 = st.columns(3)
-            # Default: Inicio do mês atual até hoje
-            data_padrao_ini = hoje.replace(day=1)
+            # CORREÇÃO: Padrão agora é voltar 30 dias para pegar dados recentes
+            data_padrao_ini = hoje - timedelta(days=30)
             
             data_inicio = col_f1.date_input("De:", value=data_padrao_ini)
             data_fim = col_f2.date_input("Até:", value=hoje)
             
             if not df_interacoes.empty:
                 tipos_disp = df_interacoes['Tipo'].unique().tolist()
-                tipos_filtro = col_f3.multiselect("Tipos:", tipos_disp, default=tipos_disp)
+                tipos_filtro = col_f3.multiselect("Filtrar Tipos (Tabela):", tipos_disp, default=tipos_disp)
             else:
                 tipos_filtro = []
 
-        # 2. PROCESSAMENTO DOS DADOS FILTRADOS
+        # 2. CÁLCULO DOS DADOS
         if not df_interacoes.empty:
-            # Filtro de Data
             df_interacoes['Data_Only'] = df_interacoes['Data'].dt.date
             mask_data = (df_interacoes['Data_Only'] >= data_inicio) & (df_interacoes['Data_Only'] <= data_fim)
-            df_periodo = df_interacoes[mask_data] # Dados apenas do período
-            
-            # Filtro de Tipo (Apenas para a tabela e gráficos, NÃO para os KPIs gerais se não quiser)
-            # Mas geralmente KPIs obedecem o filtro de data rigorosamente
-            
-            # CÁLCULO DOS KPIs (Baseado no Período Selecionado)
-            
-            # Valor em Aberto (Soma de orçamentos enviados)
+            df_periodo = df_interacoes[mask_data]
+
             vlr_orcado = df_periodo[df_periodo['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum()
-            
-            # Valor Perdido
             vlr_perdido = df_periodo[df_periodo['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum()
-            
-            # Valor Fechado
             vlr_fechado = df_periodo[df_periodo['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum()
             qtd_fechado = len(df_periodo[df_periodo['Tipo'] == 'Venda Fechada'])
-            
-            # Total de Atendimentos (Qualquer interação no período)
             qtd_atendimentos = len(df_periodo)
-
         else:
-            vlr_orcado = 0.0
-            vlr_perdido = 0.0
-            vlr_fechado = 0.0
-            qtd_fechado = 0
-            qtd_atendimentos = 0
+            vlr_orcado = vlr_perdido = vlr_fechado = 0.0
+            qtd_fechado = qtd_atendimentos = 0
             df_periodo = pd.DataFrame()
 
-        # 3. EXIBIÇÃO DOS KPIs (AGORA FIXOS E VISÍVEIS)
+        # 3. EXIBIÇÃO KPIs
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        
-        kpi1.metric("💰 Volume Orçado", f"R$ {vlr_orcado:,.2f}", help="Soma dos orçamentos enviados no período")
-        kpi2.metric("👎 Vendas Perdidas", f"R$ {vlr_perdido:,.2f}", help="Soma das vendas perdidas no período")
-        kpi3.metric("✅ Vendas Fechadas", f"R$ {vlr_fechado:,.2f}", f"{qtd_fechado} contratos")
-        kpi4.metric("📞 Vol. Atendimentos", f"{qtd_atendimentos}", help="Total de interações registradas")
+        kpi1.metric("💰 Volume Orçado", f"R$ {vlr_orcado:,.2f}")
+        kpi2.metric("👎 Vendas Perdidas", f"R$ {vlr_perdido:,.2f}")
+        kpi3.metric("✅ Vendas Fechadas", f"R$ {vlr_fechado:,.2f}", f"{qtd_fechado} unid.")
+        kpi4.metric("📞 Interações", f"{qtd_atendimentos}")
 
         st.divider()
 
-        # 4. RANKING E TABELA
-        tab1, tab2 = st.tabs(["🏆 Ranking de Vendedores", "📝 Detalhe das Interações"])
+        # 4. ABAS DE VISÃO
+        tab1, tab2, tab3 = st.tabs(["🏆 Ranking", "📝 Interações Detalhadas", "👥 Base de Clientes (Status)"])
         
         with tab1:
             if not df_periodo.empty:
                 ranking = df_periodo.groupby('Vendedor').agg(
-                    Orcamentos_Feitos=('Tipo', lambda x: (x == 'Orçamento Enviado').sum()),
-                    Vendas_Qtd=('Tipo', lambda x: (x == 'Venda Fechada').sum()),
-                    Vendas_Valor=('Valor_Proposta', lambda x: x[df_periodo['Tipo'] == 'Venda Fechada'].sum()),
-                    Perdidas_Valor=('Valor_Proposta', lambda x: x[df_periodo['Tipo'] == 'Venda Perdida'].sum())
-                ).reset_index().sort_values(by='Vendas_Valor', ascending=False)
-                
+                    Orcamentos=('Tipo', lambda x: (x == 'Orçamento Enviado').sum()),
+                    Fechados=('Tipo', lambda x: (x == 'Venda Fechada').sum()),
+                    Vlr_Fechado=('Valor_Proposta', lambda x: x[df_periodo['Tipo'] == 'Venda Fechada'].sum()),
+                    Vlr_Perdido=('Valor_Proposta', lambda x: x[df_periodo['Tipo'] == 'Venda Perdida'].sum())
+                ).reset_index().sort_values(by='Vlr_Fechado', ascending=False)
                 st.dataframe(ranking, use_container_width=True)
             else:
-                st.info("Sem dados neste período.")
+                st.info("Sem dados no período.")
 
         with tab2:
             if not df_periodo.empty:
-                # Aplica o filtro de TIPO apenas na visualização da tabela
                 df_tabela = df_periodo[df_periodo['Tipo'].isin(tipos_filtro)]
-                
                 colunas_view = ['Data', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta', 'Vendedor']
                 cols_finais = [c for c in colunas_view if c in df_tabela.columns]
                 st.dataframe(df_tabela[cols_finais].sort_values(by='Data', ascending=False), use_container_width=True)
             else:
-                st.info("Sem dados.")
+                st.info("Sem interações.")
 
-    # --- ÁREA VENDEDOR (SEM MUDANÇAS) ---
+        with tab3:
+            # NOVA ABA: Para o Gestor ver os clientes, mesmo sem interação
+            st.subheader("Visão Geral da Carteira")
+            col_sel = ['Nome_Fantasia', 'ID_Cliente_CNPJ_CPF', 'Ultimo_Vendedor', 'Status', 'Data_Ultima_Compra', 'Telefone_Contato1']
+            st.dataframe(df[col_sel], use_container_width=True)
+
+    # --- ÁREA VENDEDOR ---
     else:
         st.title(f"Área: {usuario_logado}")
         
@@ -325,6 +305,10 @@ if df is not None and not df.empty:
                     dados = meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cliente_id].iloc[0]
                     with st.container(border=True):
                         st.markdown(f"### {dados['Nome_Fantasia']}")
+                        
+                        # CNPJ ADICIONADO AQUI
+                        st.caption(f"🆔 CNPJ/CPF: {dados['ID_Cliente_CNPJ_CPF']}")
+                        
                         st.info(f"Status: **{dados['Status']}**")
 
                         c1, c2 = st.columns(2)
