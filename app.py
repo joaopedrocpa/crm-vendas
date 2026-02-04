@@ -6,7 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 7.3", layout="wide")
+st.set_page_config(page_title="CRM Master 7.4", layout="wide")
 
 # --- MENSAGEM DE CARREGAMENTO ---
 placeholder = st.empty()
@@ -33,20 +33,12 @@ def limpar_valor_monetario(valor):
 def formatar_documento(valor):
     """Aplica máscara de CPF (até 11 dígitos) ou CNPJ (>11 dígitos)"""
     if pd.isna(valor) or str(valor).strip() == '': return "-"
-    
-    # Deixa apenas números
     doc = ''.join(filter(str.isdigit, str(valor)))
-    
     if not doc: return "-"
-
-    # Lógica da Máscara
     if len(doc) > 11:
-        # CNPJ: 14 dígitos (XX.XXX.XXX/XXXX-XX)
-        # Se vier menor que 14, preenche com zeros a esquerda para evitar erro
         doc = doc.zfill(14)
         return f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
     else:
-        # CPF: 11 dígitos (XXX.XXX.XXX-XX)
         doc = doc.zfill(11)
         return f"{doc[:3]}.{doc[3:6]}.{doc[6:9]}-{doc[9:]}"
 
@@ -193,7 +185,7 @@ try:
     placeholder.empty()
 
     if df is not None and not df.empty:
-        st.sidebar.title("🚀 CRM Master 7.3")
+        st.sidebar.title("🚀 CRM Master 7.4")
         hoje = datetime.now().date()
         
         if 'Data_Ultima_Compra' in df.columns:
@@ -347,20 +339,44 @@ try:
                 c_esq, c_dir = st.columns([1, 1])
                 with c_esq:
                     st.subheader("Carteira")
-                    ops = ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '💬 WHATSAPP INICIADO', '👎 VENDA PERDIDA', '⭐ VENDA RECENTE', '🟢 ATIVO']
-                    sel_status = st.multiselect("Status:", ops, default=['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO'])
-                    lista = meus_clientes[meus_clientes['Status'].isin(sel_status)].sort_values('Status', ascending=False)
-                    if lista.empty: st.info("Nada aqui.")
-                    else: cid = st.radio("Cliente:", lista['ID_Cliente_CNPJ_CPF'].tolist(), format_func=lambda x: f"{lista[lista['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}")
+                    
+                    # --- CAMPO DE BUSCA INTELIGENTE ---
+                    termo_busca = st.text_input("🔍 Buscar por CNPJ/CPF ou Nome:", placeholder="Digite para buscar...")
+                    
+                    if termo_busca:
+                        # Se tem busca, ignora filtros e procura em TUDO da carteira
+                        termo_busca = termo_busca.upper()
+                        lista = meus_clientes[
+                            meus_clientes['Nome_Fantasia'].str.upper().str.contains(termo_busca, na=False) |
+                            meus_clientes['ID_Cliente_CNPJ_CPF'].astype(str).str.contains(termo_busca, na=False)
+                        ]
+                        if lista.empty: st.warning("Nenhum cliente encontrado com esse termo.")
+                    else:
+                        # Se não tem busca, usa os filtros normais
+                        ops = ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '💬 WHATSAPP INICIADO', '👎 VENDA PERDIDA', '⭐ VENDA RECENTE', '🟢 ATIVO']
+                        sel_status = st.multiselect("Status:", ops, default=['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO'])
+                        lista = meus_clientes[meus_clientes['Status'].isin(sel_status)].sort_values('Status', ascending=False)
+                        if lista.empty: st.info("Nenhum cliente nestes status.")
+
+                    if not lista.empty:
+                        # Limitamos a lista para não travar com 20k
+                        if len(lista) > 500 and not termo_busca:
+                            st.warning(f"Mostrando os primeiros 500 de {len(lista)} clientes. Use a busca para refinar.")
+                            lista = lista.head(500)
+                            
+                        cid = st.radio("Cliente:", lista['ID_Cliente_CNPJ_CPF'].tolist(), format_func=lambda x: f"{lista[lista['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}")
 
                 with c_dir:
                     if 'cid' in locals() and cid:
                         cli = meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cid].iloc[0]
                         with st.container(border=True):
                             st.markdown(f"### {cli['Nome_Fantasia']}")
-                            # APLICAÇÃO DA MÁSCARA AQUI
                             doc_fmt = formatar_documento(cli['ID_Cliente_CNPJ_CPF'])
                             st.caption(f"CNPJ/CPF: {doc_fmt}")
+                            
+                            # MOSTRAR O ÚLTIMO VENDEDOR (CARTEIRA)
+                            dono = cli['Ultimo_Vendedor'] if 'Ultimo_Vendedor' in cli else "N/A"
+                            st.markdown(f"**👤 Carteira:** {dono}")
                             
                             st.info(f"Status: **{cli['Status']}**")
                             
