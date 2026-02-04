@@ -6,7 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master", layout="wide")
+st.set_page_config(page_title="CRM Master 2.0", layout="wide")
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def conectar_google_sheets():
@@ -35,13 +35,14 @@ def carregar_dados_completos():
         # 2. Carrega Leads Manuais (Novos)
         try:
             sheet_leads = spreadsheet.worksheet("Novos_Leads")
-            df_leads = pd.DataFrame(sheet_leads.get_all_records())
+            dados_leads = sheet_leads.get_all_records()
+            df_leads = pd.DataFrame(dados_leads)
         except:
-            df_leads = pd.DataFrame() # Se não criou a aba ainda, segue vazio
+            df_leads = pd.DataFrame() 
             
-        # 3. Junta as duas bases (Protheus + Leads)
+        # 3. Junta as duas bases
         if not df_leads.empty:
-            # Garante que as colunas batem para não dar erro
+            # Força as colunas a serem strings para evitar conflito
             df_geral = pd.concat([df_protheus, df_leads], ignore_index=True)
         else:
             df_geral = df_protheus
@@ -61,13 +62,11 @@ def carregar_dados_completos():
         except:
             df_interacoes = pd.DataFrame(columns=['CNPJ_Cliente', 'Data', 'Tipo', 'Resumo', 'Vendedor'])
 
-        # 5. Carrega Configuração de Equipe (Permissões)
+        # 5. Carrega Configuração de Equipe
         try:
             sheet_config = spreadsheet.worksheet("Config_Equipe")
             df_config = pd.DataFrame(sheet_config.get_all_records())
         except:
-            # Se não existir, cria um padrão básico automático
-            st.warning("Aba 'Config_Equipe' não encontrada. Usando modo simples.")
             df_config = pd.DataFrame(columns=['Usuario_Login', 'Carteiras_Visiveis'])
 
         return df_geral, df_interacoes, df_config
@@ -87,16 +86,44 @@ def salvar_interacao_nuvem(cnpj, data, tipo, resumo, vendedor):
         st.error(f"Erro ao salvar: {e}")
         return False
 
+# NOVA FUNÇÃO: SALVAR LEAD DIRETO NO GOOGLE
+def salvar_novo_lead(cnpj, nome, contato, telefone, vendedor):
+    try:
+        spreadsheet = conectar_google_sheets()
+        sheet = spreadsheet.worksheet("Novos_Leads")
+        
+        # Prepara a linha seguindo a ordem do seu CSV original para não quebrar
+        # Ordem assumida: ID, Nome, Contato, Tipo, Tel1, Tel2, Email, Total, Data, Notas, Dias, Vendedor
+        nova_linha = [
+            str(cnpj),                  # ID_Cliente_CNPJ_CPF
+            nome.upper(),               # Nome_Fantasia
+            contato,                    # Contato
+            "NOVO LEAD",                # Tipo_Cliente
+            telefone,                   # Telefone_Contato1
+            "",                         # Telefone_Contato2
+            "",                         # Email
+            "0",                        # Total_Compras
+            "",                         # Data_Ultima_Compra (Vazio)
+            "0",                        # Total_Notas
+            "",                         # Dias_Sem_Comprar (Vazio)
+            vendedor                    # Ultimo_Vendedor
+        ]
+        
+        sheet.append_row(nova_linha)
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao criar lead: {e}")
+        return False
+
 # --- INTERFACE ---
-st.sidebar.title("🚀 CRM Master")
+st.sidebar.title("🚀 CRM Master 2.0")
 
 # Carrega tudo
 df, df_interacoes, df_config = carregar_dados_completos()
 
 if df is not None and not df.empty:
     hoje = datetime.now()
-    
-    # Cálculos
     df['Dias_Sem_Comprar'] = (hoje - df['Data_Ultima_Compra']).dt.days
 
     # Lógica de Status
@@ -117,92 +144,105 @@ if df is not None and not df.empty:
                     if ultima['Tipo'] == 'Ligação Realizada': return '📞 CONTATADO RECENTEMENTE'
                 except: pass
         
-        # Se for Lead Novo (sem data de compra)
-        if pd.isna(linha['Dias_Sem_Comprar']):
-            return '🆕 NOVO LEAD'
-            
+        if pd.isna(linha['Dias_Sem_Comprar']): return '🆕 NOVO LEAD'
         if linha['Dias_Sem_Comprar'] >= 60: return '🔴 RECUPERAR'
         return '🟢 ATIVO'
 
     df['Status'] = df.apply(calcular_status, axis=1)
 
-    # --- SISTEMA DE LOGIN COM PERMISSÕES ---
-    
-    # Se a tabela de config estiver vazia, usa a lista de vendedores do CSV (Modo Antigo)
+    # --- LOGIN ---
     if df_config.empty:
         usuarios_disponiveis = df['Ultimo_Vendedor'].unique().tolist()
         usuarios_disponiveis.insert(0, "GESTOR")
     else:
-        # Modo Novo: Usa a tabela Config_Equipe
         usuarios_disponiveis = df_config['Usuario_Login'].unique().tolist()
 
-    usuario_logado = st.sidebar.selectbox("Selecione seu Usuário:", usuarios_disponiveis)
+    usuario_logado = st.sidebar.selectbox("Usuário:", usuarios_disponiveis)
 
-    # --- FILTRO DE CARTEIRA (A MÁGICA ACONTECE AQUI) ---
+    # --- NOVO RECURSO: CADASTRO DE LEAD ---
+    if usuario_logado != "GESTOR":
+        st.sidebar.markdown("---")
+        with st.sidebar.expander("➕ Cadastrar Novo Lead"):
+            with st.form("form_novo_lead"):
+                novo_nome = st.text_input("Nome da Empresa/Cliente")
+                novo_cnpj = st.text_input("CPF ou CNPJ (Só números)")
+                novo_contato = st.text_input("Nome do Contato")
+                novo_tel = st.text_input("Telefone / WhatsApp")
+                
+                if st.form_submit_button("Salvar Lead"):
+                    if novo_nome and novo_cnpj:
+                        if salvar_novo_lead(novo_cnpj, novo_nome, novo_contato, novo_tel, usuario_logado):
+                            st.success("Lead Cadastrado! Ele já aparecerá na sua lista.")
+                            st.rerun()
+                    else:
+                        st.warning("Preencha Nome e CPF/CNPJ.")
+
+    # --- LÓGICA DE PERMISSÃO (CORRIGIDA PARA "TODOS") ---
     if usuario_logado == "GESTOR":
-        meus_clientes = df # Gestor vê tudo
+        meus_clientes = df
     else:
         if not df_config.empty:
-            # 1. Acha a linha do usuário na config
             regra_usuario = df_config[df_config['Usuario_Login'] == usuario_logado]
-            
             if not regra_usuario.empty:
-                # 2. Pega as carteiras que ele pode ver (separadas por virgula)
                 carteiras_string = regra_usuario.iloc[0]['Carteiras_Visiveis']
-                # Separa a string em uma lista. Ex: "Joaquim, Selma" vira ['Joaquim', 'Selma']
-                lista_permitida = [nome.strip() for nome in carteiras_string.split(',')]
                 
-                # 3. Filtra o DataFrame principal
-                meus_clientes = df[df['Ultimo_Vendedor'].isin(lista_permitida)]
+                # AQUI ESTÁ A CORREÇÃO:
+                if "TODOS" in carteiras_string.upper(): # Verifica se tem a palavra TODOS
+                    meus_clientes = df # Libera tudo
+                else:
+                    lista_permitida = [nome.strip() for nome in carteiras_string.split(',')]
+                    meus_clientes = df[df['Ultimo_Vendedor'].isin(lista_permitida)]
             else:
-                meus_clientes = pd.DataFrame() # Usuário sem configuração
+                meus_clientes = pd.DataFrame()
         else:
-            # Fallback se não tiver config
             meus_clientes = df[df['Ultimo_Vendedor'] == usuario_logado]
 
-    # --- EXIBIÇÃO ---
+    # --- ÁREA PRINCIPAL ---
     if usuario_logado == "GESTOR":
         st.title("Painel Diretoria")
         kpi1, kpi2, kpi3 = st.columns(3)
         kpi1.metric("Total Base", len(df))
-        kpi2.metric("Oportunidades (+60d)", len(df[df['Status']=='🔴 RECUPERAR']))
+        kpi2.metric("A Recuperar", len(df[df['Status']=='🔴 RECUPERAR']))
         kpi3.metric("Novos Leads", len(df[df['Status']=='🆕 NOVO LEAD']))
         st.dataframe(df_interacoes.tail(10), use_container_width=True)
         
     else:
         st.title(f"Área: {usuario_logado}")
         
-        # Verifica se o vendedor tem clientes
         if meus_clientes.empty:
-            st.error("Nenhum cliente vinculado ao seu perfil. Verifique a aba 'Config_Equipe'.")
+            st.error("Nenhum cliente vinculado. Fale com o Gestor.")
         else:
             col_esq, col_dir = st.columns([1, 1])
             with col_esq:
                 st.subheader("Sua Carteira")
-                status_filter = st.multiselect("Status:", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '🆕 NOVO LEAD', '🟢 ATIVO'], default=['🔴 RECUPERAR', '🆕 NOVO LEAD'])
-                
+                # Filtro padrão inclui NOVOS LEADS agora
+                status_filter = st.multiselect("Filtrar:", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '🆕 NOVO LEAD', '🟢 ATIVO'], default=['🔴 RECUPERAR', '🆕 NOVO LEAD'])
                 filtro_final = meus_clientes[meus_clientes['Status'].isin(status_filter)]
                 
                 if filtro_final.empty:
-                    st.info("Nenhum cliente nesse status.")
+                    st.info("Lista vazia para este filtro.")
                 else:
                     cliente_id = st.radio("Selecione:", filtro_final['ID_Cliente_CNPJ_CPF'].tolist(), 
-                                         format_func=lambda x: f"{filtro_final[filtro_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]} ({filtro_final[filtro_final['ID_Cliente_CNPJ_CPF']==x]['Ultimo_Vendedor'].values[0]})")
+                                         format_func=lambda x: f"{filtro_final[filtro_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]} ({filtro_final[filtro_final['ID_Cliente_CNPJ_CPF']==x]['Status'].values[0]})")
 
             with col_dir:
                 if 'cliente_id' in locals() and cliente_id:
                     dados = meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cliente_id].iloc[0]
                     with st.container(border=True):
                         st.markdown(f"### {dados['Nome_Fantasia']}")
-                        st.caption(f"Carteira Original: {dados['Ultimo_Vendedor']}") # Mostra de quem é o cliente
                         
+                        # Mostra dono original apenas se for diferente do usuário logado
+                        if dados['Ultimo_Vendedor'] != usuario_logado:
+                            st.caption(f"Carteira: {dados['Ultimo_Vendedor']}")
+
                         c1, c2 = st.columns(2)
                         c1.write(f"📞 {dados['Telefone_Contato1']}")
-                        # Tenta mostrar data, se for NaT (Novo Lead), mostra aviso
+                        c1.write(f"👤 {dados['Contato']}")
+                        
                         if pd.isna(dados['Data_Ultima_Compra']):
-                            c2.write("📅 **Novo Lead**")
+                            c2.info("🆕 Cliente Novo")
                         else:
-                            c2.write(f"📅 {dados['Data_Ultima_Compra'].strftime('%d/%m/%Y')}")
+                            c2.write(f"📅 Última Compra: {dados['Data_Ultima_Compra'].strftime('%d/%m/%Y')}")
                         
                         st.divider()
                         with st.form("acao"):
@@ -214,4 +254,4 @@ if df is not None and not df.empty:
                                 st.rerun()
 
 else:
-    st.warning("Carregando base de dados...")
+    st.warning("Carregando...")
