@@ -6,7 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 2.0", layout="wide")
+st.set_page_config(page_title="CRM Master 3.0", layout="wide")
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def conectar_google_sheets():
@@ -42,12 +42,11 @@ def carregar_dados_completos():
             
         # 3. Junta as duas bases
         if not df_leads.empty:
-            # Força as colunas a serem strings para evitar conflito
             df_geral = pd.concat([df_protheus, df_leads], ignore_index=True)
         else:
             df_geral = df_protheus
 
-        # Tratamento de Moeda e Data
+        # Tratamento de dados
         if not df_geral.empty:
             if df_geral['Total_Compras'].dtype == 'object':
                 df_geral['Total_Compras'] = df_geral['Total_Compras'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
@@ -86,30 +85,24 @@ def salvar_interacao_nuvem(cnpj, data, tipo, resumo, vendedor):
         st.error(f"Erro ao salvar: {e}")
         return False
 
-# NOVA FUNÇÃO: SALVAR LEAD DIRETO NO GOOGLE
-def salvar_novo_lead(cnpj, nome, contato, telefone, vendedor):
+# FUNÇÃO REVISADA: SALVA LEAD + ORIGEM + PRIMEIRA INTERAÇÃO
+def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, primeira_acao, resumo_inicial):
     try:
         spreadsheet = conectar_google_sheets()
-        sheet = spreadsheet.worksheet("Novos_Leads")
         
-        # Prepara a linha seguindo a ordem do seu CSV original para não quebrar
-        # Ordem assumida: ID, Nome, Contato, Tipo, Tel1, Tel2, Email, Total, Data, Notas, Dias, Vendedor
+        # 1. Salva na aba Novos_Leads
+        sheet_leads = spreadsheet.worksheet("Novos_Leads")
         nova_linha = [
-            str(cnpj),                  # ID_Cliente_CNPJ_CPF
-            nome.upper(),               # Nome_Fantasia
-            contato,                    # Contato
-            "NOVO LEAD",                # Tipo_Cliente
-            telefone,                   # Telefone_Contato1
-            "",                         # Telefone_Contato2
-            "",                         # Email
-            "0",                        # Total_Compras
-            "",                         # Data_Ultima_Compra (Vazio)
-            "0",                        # Total_Notas
-            "",                         # Dias_Sem_Comprar (Vazio)
-            vendedor                    # Ultimo_Vendedor
+            str(cnpj), nome.upper(), contato, "NOVO LEAD", telefone, "", "", "0", "", "0", "", 
+            vendedor, # Coluna Ultimo_Vendedor
+            origem    # Coluna Origem (Nova)
         ]
+        sheet_leads.append_row(nova_linha)
         
-        sheet.append_row(nova_linha)
+        # 2. Salva na aba Interacoes (Para já gerar status)
+        sheet_interacoes = spreadsheet.worksheet("Interacoes")
+        sheet_interacoes.append_row([str(cnpj), str(datetime.now()), primeira_acao, resumo_inicial, vendedor])
+        
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -117,9 +110,8 @@ def salvar_novo_lead(cnpj, nome, contato, telefone, vendedor):
         return False
 
 # --- INTERFACE ---
-st.sidebar.title("🚀 CRM Master 2.0")
+st.sidebar.title("🚀 CRM Master 3.0")
 
-# Carrega tudo
 df, df_interacoes, df_config = carregar_dados_completos()
 
 if df is not None and not df.empty:
@@ -142,9 +134,10 @@ if df is not None and not df.empty:
                         return '⚠️ FOLLOW-UP' if dias_acao >= 5 else '⏳ NEGOCIAÇÃO'
                     if ultima['Tipo'] == 'Venda Fechada': return '⭐ VENDA RECENTE'
                     if ultima['Tipo'] == 'Ligação Realizada': return '📞 CONTATADO RECENTEMENTE'
+                    if ultima['Tipo'] == 'WhatsApp Enviado': return '💬 WHATSAPP INICIADO'
                 except: pass
         
-        if pd.isna(linha['Dias_Sem_Comprar']): return '🆕 NOVO LEAD'
+        if pd.isna(linha['Dias_Sem_Comprar']): return '🆕 NOVO S/ INTERAÇÃO'
         if linha['Dias_Sem_Comprar'] >= 60: return '🔴 RECUPERAR'
         return '🟢 ATIVO'
 
@@ -159,25 +152,49 @@ if df is not None and not df.empty:
 
     usuario_logado = st.sidebar.selectbox("Usuário:", usuarios_disponiveis)
 
-    # --- NOVO RECURSO: CADASTRO DE LEAD ---
+    # --- CADASTRO DE LEAD BLINDADO ---
     if usuario_logado != "GESTOR":
         st.sidebar.markdown("---")
         with st.sidebar.expander("➕ Cadastrar Novo Lead"):
-            with st.form("form_novo_lead"):
+            with st.form("form_novo_lead", clear_on_submit=False):
+                st.write("**Dados do Cliente**")
                 novo_nome = st.text_input("Nome da Empresa/Cliente")
                 novo_cnpj = st.text_input("CPF ou CNPJ (Só números)")
                 novo_contato = st.text_input("Nome do Contato")
                 novo_tel = st.text_input("Telefone / WhatsApp")
                 
-                if st.form_submit_button("Salvar Lead"):
-                    if novo_nome and novo_cnpj:
-                        if salvar_novo_lead(novo_cnpj, novo_nome, novo_contato, novo_tel, usuario_logado):
-                            st.success("Lead Cadastrado! Ele já aparecerá na sua lista.")
-                            st.rerun()
+                st.write("**Origem e Status Inicial**")
+                nova_origem = st.selectbox("Origem do Lead:", 
+                    ["SELECIONE...", "SZ.CHAT", "LIGAÇÃO", "PRESENCIAL", "E-MAIL", "INDICAÇÃO"])
+                
+                primeira_acao = st.selectbox("Primeira Ação Realizada:", 
+                    ["SELECIONE...", "Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
+                
+                novo_resumo = st.text_area("Resumo (O que foi conversado?)")
+                
+                # Botão de Envio
+                enviado = st.form_submit_button("💾 SALVAR LEAD")
+                
+                if enviado:
+                    # VALIDAÇÃO FORTE: Só salva se tudo estiver preenchido
+                    erros = []
+                    if not novo_nome: erros.append("Falta Nome")
+                    if not novo_cnpj: erros.append("Falta CPF/CNPJ")
+                    if nova_origem == "SELECIONE...": erros.append("Selecione a Origem")
+                    if primeira_acao == "SELECIONE...": erros.append("Selecione a Primeira Ação (Status)")
+                    
+                    if erros:
+                        st.error(f"Preencha todos os campos! {', '.join(erros)}")
                     else:
-                        st.warning("Preencha Nome e CPF/CNPJ.")
+                        sucesso = salvar_novo_lead_completo(
+                            novo_cnpj, novo_nome, novo_contato, novo_tel, 
+                            usuario_logado, nova_origem, primeira_acao, novo_resumo
+                        )
+                        if sucesso:
+                            st.success("Lead cadastrado e Status atualizado!")
+                            st.rerun()
 
-    # --- LÓGICA DE PERMISSÃO (CORRIGIDA PARA "TODOS") ---
+    # --- LÓGICA DE PERMISSÃO ---
     if usuario_logado == "GESTOR":
         meus_clientes = df
     else:
@@ -185,10 +202,8 @@ if df is not None and not df.empty:
             regra_usuario = df_config[df_config['Usuario_Login'] == usuario_logado]
             if not regra_usuario.empty:
                 carteiras_string = regra_usuario.iloc[0]['Carteiras_Visiveis']
-                
-                # AQUI ESTÁ A CORREÇÃO:
-                if "TODOS" in carteiras_string.upper(): # Verifica se tem a palavra TODOS
-                    meus_clientes = df # Libera tudo
+                if "TODOS" in carteiras_string.upper(): 
+                    meus_clientes = df 
                 else:
                     lista_permitida = [nome.strip() for nome in carteiras_string.split(',')]
                     meus_clientes = df[df['Ultimo_Vendedor'].isin(lista_permitida)]
@@ -202,25 +217,37 @@ if df is not None and not df.empty:
         st.title("Painel Diretoria")
         kpi1, kpi2, kpi3 = st.columns(3)
         kpi1.metric("Total Base", len(df))
-        kpi2.metric("A Recuperar", len(df[df['Status']=='🔴 RECUPERAR']))
-        kpi3.metric("Novos Leads", len(df[df['Status']=='🆕 NOVO LEAD']))
-        st.dataframe(df_interacoes.tail(10), use_container_width=True)
+        
+        # Filtra status corretamente ignorando erros de NaN
+        filtro_recuperar = df[df['Status'] == '🔴 RECUPERAR']
+        kpi2.metric("A Recuperar", len(filtro_recuperar))
+        
+        # Conta Leads novos baseados na origem se existir a coluna, ou pelo status
+        if 'Origem' in df.columns:
+             kpi3.metric("Leads Cadastrados", len(df[df['Ultimo_Vendedor'] != ''])) # Exemplo genérico
+        else:
+             kpi3.metric("Interações Hoje", len(df_interacoes[pd.to_datetime(df_interacoes['Data']).dt.date == hoje.date()]) if not df_interacoes.empty else 0)
+             
+        st.subheader("Últimas Interações")
+        st.dataframe(df_interacoes.tail(15), use_container_width=True)
         
     else:
         st.title(f"Área: {usuario_logado}")
         
         if meus_clientes.empty:
-            st.error("Nenhum cliente vinculado. Fale com o Gestor.")
+            st.error("Nenhum cliente vinculado.")
         else:
             col_esq, col_dir = st.columns([1, 1])
             with col_esq:
                 st.subheader("Sua Carteira")
-                # Filtro padrão inclui NOVOS LEADS agora
-                status_filter = st.multiselect("Filtrar:", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '🆕 NOVO LEAD', '🟢 ATIVO'], default=['🔴 RECUPERAR', '🆕 NOVO LEAD'])
+                # Opções de filtro atualizadas
+                opcoes_status = ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '💬 WHATSAPP INICIADO', '📞 CONTATADO RECENTEMENTE', '🟢 ATIVO']
+                status_filter = st.multiselect("Filtrar:", opcoes_status, default=['🔴 RECUPERAR', '⏳ NEGOCIAÇÃO', '💬 WHATSAPP INICIADO'])
+                
                 filtro_final = meus_clientes[meus_clientes['Status'].isin(status_filter)]
                 
                 if filtro_final.empty:
-                    st.info("Lista vazia para este filtro.")
+                    st.info("Nenhum cliente neste status.")
                 else:
                     cliente_id = st.radio("Selecione:", filtro_final['ID_Cliente_CNPJ_CPF'].tolist(), 
                                          format_func=lambda x: f"{filtro_final[filtro_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]} ({filtro_final[filtro_final['ID_Cliente_CNPJ_CPF']==x]['Status'].values[0]})")
@@ -230,28 +257,29 @@ if df is not None and not df.empty:
                     dados = meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cliente_id].iloc[0]
                     with st.container(border=True):
                         st.markdown(f"### {dados['Nome_Fantasia']}")
-                        
-                        # Mostra dono original apenas se for diferente do usuário logado
                         if dados['Ultimo_Vendedor'] != usuario_logado:
                             st.caption(f"Carteira: {dados['Ultimo_Vendedor']}")
 
                         c1, c2 = st.columns(2)
                         c1.write(f"📞 {dados['Telefone_Contato1']}")
-                        c1.write(f"👤 {dados['Contato']}")
+                        
+                        # Mostra Origem se tiver
+                        if 'Origem' in dados and str(dados['Origem']) != 'nan':
+                            c2.write(f"📌 Origem: **{dados['Origem']}**")
                         
                         if pd.isna(dados['Data_Ultima_Compra']):
-                            c2.info("🆕 Cliente Novo")
+                            c2.info(f"Status: {dados['Status']}")
                         else:
-                            c2.write(f"📅 Última Compra: {dados['Data_Ultima_Compra'].strftime('%d/%m/%Y')}")
+                            c2.write(f"📅 Compra: {dados['Data_Ultima_Compra'].strftime('%d/%m/%Y')}")
                         
                         st.divider()
                         with st.form("acao"):
-                            tipo = st.selectbox("Ação", ["Ligação", "WhatsApp", "Orçamento", "Venda Fechada"])
+                            tipo = st.selectbox("Nova Ação", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Venda Fechada"])
                             obs = st.text_area("Obs:")
-                            if st.form_submit_button("Salvar"):
+                            if st.form_submit_button("Salvar Histórico"):
                                 salvar_interacao_nuvem(cliente_id, datetime.now(), tipo, obs, usuario_logado)
                                 st.success("Salvo!")
                                 st.rerun()
 
 else:
-    st.warning("Carregando...")
+    st.warning("Carregando base de dados...")
