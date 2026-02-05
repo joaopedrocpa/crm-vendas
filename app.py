@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 15.0", layout="wide")
+st.set_page_config(page_title="CRM Master 16.0", layout="wide")
 
 # --- CSS (VISUAL DARK) ---
 st.markdown("""
@@ -236,7 +236,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 15.0")
+    st.sidebar.title("🚀 CRM Master 16.0")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -302,7 +302,6 @@ try:
                     if tem_proposta_aberta:
                         return '⏳ NEGOCIAÇÃO'
                     else:
-                        # Se não tem nada aberto, vale a última ação cronológica
                         filtro_sorted = filtro.sort_values('Data_Obj', ascending=True)
                         ultima = filtro_sorted.iloc[-1]
                         try:
@@ -390,12 +389,10 @@ try:
                 vlr_fechado = int(df_filtered[df_filtered['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum())
                 qtd_interacoes = len(df_filtered)
                 
-                # 3. KPI NA MESA (Calculado Explicito)
-                # Filtra Orçamentos do período/vendedor selecionado que NÃO foram baixados
+                # 3. KPI NA MESA
                 orcamentos_periodo = df_filtered[df_filtered['Tipo'] == 'Orçamento Enviado']
                 for _, row in orcamentos_periodo.iterrows():
                     pid = extrair_id(row['Resumo'])
-                    # Se não tem ID (antigo) ou ID não está na lista global de resolvidos -> SOMA
                     if not pid or (pid and pid not in ids_resolvidos):
                         vlr_pipeline += row['Valor_Proposta']
                 
@@ -407,7 +404,7 @@ try:
 
             k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("💰 Orçado", formatar_moeda_visual(vlr_orcado))
-            k2.metric("🔮 Na Mesa", formatar_moeda_visual(vlr_pipeline), help="Orçamentos enviados neste período que ainda estão abertos.")
+            k2.metric("🔮 Na Mesa", formatar_moeda_visual(vlr_pipeline))
             k3.metric("✅ Fechado", formatar_moeda_visual(vlr_fechado))
             k4.metric("👎 Perdido", formatar_moeda_visual(vlr_perdido))
             k5.metric("📞 Interações", f"{qtd_interacoes}")
@@ -468,6 +465,11 @@ try:
                             v_contato = cli.get('Nome_Contato', '-') if 'Nome_Contato' in cli else cli.get('Contato', '-')
                             col_d1.write(f"**👤 Contato:** {v_contato}")
                             col_d1.write(f"**📞 Tel:** {cli.get('Telefone_Contato1', '-')}")
+                            
+                            # MOSTRAR CARTEIRA (DONO) AQUI
+                            v_dono = cli.get('Ultimo_Vendedor', '-')
+                            col_d2.write(f"**👔 Carteira:** {v_dono}")
+                            
                             col_d2.write(f"**💰 Total:** {formatar_moeda_visual(cli.get('Total_Compras', 0))}")
                             col_d2.write(f"**📅 Compra:** {formatar_data_br(cli.get('Data_Ultima_Compra', '-'))}")
                             st.divider()
