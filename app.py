@@ -8,9 +8,9 @@ import random
 import string
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 9.4", layout="wide")
+st.set_page_config(page_title="CRM Master 9.5", layout="wide")
 
-# --- CSS VISUAL (DARK MODE) ---
+# --- CSS (VISUAL DARK) ---
 st.markdown("""
 <style>
     [data-testid="stSidebar"] {min-width: 300px;}
@@ -25,9 +25,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES AUXILIARES ---
+# --- FUNÇÕES ---
 def gerar_id_proposta():
-    """Gera um ID curto para a proposta (Ex: AF3D)"""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
 def formatar_moeda_visual(valor):
@@ -37,13 +36,24 @@ def formatar_moeda_visual(valor):
     except: return str(valor)
 
 def limpar_valor_monetario(valor):
-    """Lê o dado do Google Sheets e transforma em número Python"""
+    """
+    CORREÇÃO DO ERRO DE 100x:
+    - Se vier 1024.35 (float ou str com ponto), mantém o ponto.
+    - Se vier 1.024,35 (str com vírgula), faz a conversão BR.
+    """
     if pd.isna(valor): return 0.0
     if isinstance(valor, (int, float)): return float(valor)
+    
     s = str(valor).strip().replace('R$', '').strip()
     if s == '': return 0.0
-    # Remove ponto de milhar e troca vírgula por ponto
-    s = s.replace('.', '').replace(',', '.')
+    
+    # SE TIVER VÍRGULA, É FORMATO BRASILEIRO (1.000,00)
+    if ',' in s:
+        s = s.replace('.', '').replace(',', '.')
+    
+    # SE NÃO TEM VÍRGULA, ASSUMIMOS QUE É PADRÃO US OU INT (1000.00 ou 1000)
+    # Nesse caso, NÃO removemos o ponto, pois ele é decimal, não milhar.
+    
     try: return float(s)
     except: return 0.0
 
@@ -139,18 +149,17 @@ def carregar_dados_completos():
         st.error(f"Erro Crítico: {e}")
         return None, None, None
 
-# --- SALVAMENTO (ESTRATÉGIA STRING COM VÍRGULA) ---
+# --- SALVAMENTO ---
 def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor=0.0):
     try:
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
         data_str = data_obj.strftime('%d/%m/%Y')
         
-        # FORÇA A VIRGULA PARA O GOOGLE SHEETS BRASILEIRO
-        # 1024.35 vira "1024,35" (String)
+        # Salva como Texto com Vírgula para o Excel entender Visualmente
         valor_str = f"{float(valor):.2f}".replace('.', ',')
         
-        # Gera ID se for Orçamento
+        # Lógica de ID para rastreamento
         id_prop = f"#{gerar_id_proposta()}" if tipo == "Orçamento Enviado" else ""
         resumo_final = f"{id_prop} {resumo}" if id_prop else resumo
 
@@ -167,11 +176,9 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         sheet_leads = spreadsheet.worksheet("Novos_Leads")
         nova_linha = [str(cnpj), nome.upper(), contato, "NOVO LEAD", telefone, "", "", "0", "", "0", "", vendedor, origem]
         sheet_leads.append_row(nova_linha)
-        
         sheet_interacoes = spreadsheet.worksheet("Interacoes")
         data_str = datetime.now().strftime('%d/%m/%Y')
         
-        # FORÇA A VIRGULA
         valor_str = f"{float(valor_inicial):.2f}".replace('.', ',')
         
         id_prop = f"#{gerar_id_proposta()}" if primeira_acao == "Orçamento Enviado" else ""
@@ -207,7 +214,7 @@ def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 9.4")
+    st.sidebar.title("🚀 CRM Master 9.5")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -249,7 +256,8 @@ try:
                 cnpj_str = str(cnpj)
                 filtro = df_interacoes[df_interacoes['CNPJ_Cliente'] == cnpj_str]
                 if not filtro.empty:
-                    ultima = filtro.iloc[-1] # Pega o último
+                    # Pega a última da lista (ordem de inserção)
+                    ultima = filtro.iloc[-1]
                     try:
                         if pd.notna(ultima['Data_Obj']):
                             dias_acao = (hoje - ultima['Data_Obj']).days
@@ -285,7 +293,7 @@ try:
                 st.text_area("Resumo:", key="novo_resumo")
                 st.button("💾 SALVAR LEAD", type="primary", on_click=processar_salvamento_lead, args=(usuario_logado,))
 
-        # FILTRO DE CARTEIRA
+        # FILTROS
         if "TODOS" in carteiras_permitidas:
             meus_clientes = df
             minhas_interacoes = df_interacoes
@@ -392,20 +400,16 @@ try:
                             col_d2.write(f"**📅 Compra:** {formatar_data_br(cli.get('Data_Ultima_Compra', '-'))}")
                             st.divider()
                             
-                            # --- HISTÓRICO DE INTERAÇÕES (TABELA) ---
-                            st.markdown("#### 📜 Últimas 5 Interações")
+                            st.markdown("#### 📜 Últimas Interações")
                             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                                 hist = df_interacoes[df_interacoes['CNPJ_Cliente'] == str(cid)]
                                 if not hist.empty:
-                                    # Mostra as ultimas 5, do mais recente para o antigo
-                                    hist_view = hist.tail(5).iloc[::-1][['Data_Obj', 'Tipo', 'Resumo', 'Valor_Proposta']]
+                                    # INVERTE A ORDEM PARA MOSTRAR MAIS RECENTE PRIMEIRO
+                                    hist_view = hist.iloc[::-1][['Data_Obj', 'Tipo', 'Resumo', 'Valor_Proposta']].head(5)
                                     hist_view.rename(columns={'Data_Obj': 'Data', 'Valor_Proposta': 'Valor'}, inplace=True)
-                                    # Formata visualmente a tabela
                                     hist_view['Valor'] = hist_view['Valor'].apply(formatar_moeda_visual)
                                     hist_view['Data'] = hist_view['Data'].apply(formatar_data_br)
                                     st.dataframe(hist_view, hide_index=True, use_container_width=True)
-                                else:
-                                    st.info("Nenhuma interação registrada.")
                             
                             st.divider()
                             st.markdown("#### 📝 Nova Interação")
