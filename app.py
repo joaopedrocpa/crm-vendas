@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 20.0", layout="wide")
+st.set_page_config(page_title="CRM Master 20.1", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
 # --- CSS (VISUAL DARK PREMIUM) ---
@@ -314,7 +314,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 # --- APP ---
 try:
     if URL_LOGO: st.sidebar.image(URL_LOGO, width=150)
-    st.sidebar.title("🚀 CRM Master 20.0")
+    st.sidebar.title("🚀 CRM Master 20.1")
     
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
@@ -411,7 +411,7 @@ try:
         
         if not df_interacoes.empty:
             # Filtro Mes Atual + Usuario
-            mask_mes = (df_interacoes['Vendedor'] == usuario_logado) & (df_interacoes['Data_Obj'] >= primul_dia_mes)
+            mask_mes = (df_interacoes['Vendedor'] == usuario_logado) & (df_interacoes['Data_Obj'] >= primeiro_dia_mes)
             df_mes = df_interacoes[mask_mes]
             
             if not df_mes.empty:
