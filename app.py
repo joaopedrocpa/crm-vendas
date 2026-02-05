@@ -6,62 +6,70 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import random
 import string
-import time
+import re
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 9.6", layout="wide")
+st.set_page_config(page_title="CRM Master 10.0", layout="wide")
 
-# --- CSS (VISUAL DARK) ---
+# --- CSS (VISUAL DARK MELHORADO) ---
 st.markdown("""
 <style>
     [data-testid="stSidebar"] {min-width: 300px;}
     div[data-testid="stMetric"] {
-        background-color: #1E1E1E;
-        border: 1px solid #333;
+        background-color: #262730;
+        border: 1px solid #464b5c;
         padding: 15px;
         border-radius: 8px;
     }
     div[data-testid="stMetricLabel"] {color: #b0b3b8 !important; font-weight: bold;}
     div[data-testid="stMetricValue"] {color: #ffffff !important;}
+    .stButton button {width: 100%;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES ---
+# --- FUNÇÕES DE NÚCLEO ---
+
 def gerar_id_proposta():
+    """Gera um ID único para a proposta"""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
-def formatar_moeda_visual(valor):
-    """Formata apenas para exibir na tela (R$ 1.000,00)"""
-    if pd.isna(valor) or str(valor).strip() == '': return "R$ 0,00"
-    try:
-        return f"R$ {float(valor):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-    except: return str(valor)
-
-def converter_input_para_float(valor_str):
+def limpar_valor_monetario(valor):
     """
-    RECEBE TEXTO (Ex: '1.500,50') E DEVOLVE FLOAT (1500.50)
-    Essa função é a responsável por corrigir o erro da vírgula.
+    Função BLINDADA de Conversão.
+    Aceita: '1.500,00', '1500,00', 'R$ 1.500,00', 1500.00
+    Retorna: Float (1500.00)
     """
-    if not valor_str: return 0.0
-    if isinstance(valor_str, (int, float)): return float(valor_str)
+    if pd.isna(valor): return 0.0
+    if isinstance(valor, (int, float)): return float(valor)
     
-    # Remove R$ e espaços
-    s = str(valor_str).replace('R$', '').strip()
+    # Remove tudo que não for número, vírgula ou ponto
+    s = str(valor).strip()
+    s = re.sub(r'[^\d.,]', '', s) # Remove R$, espaços, letras
     
-    # 1. Elimina os pontos de milhar (Ex: 1.500,00 -> 1500,00)
-    s = s.replace('.', '')
+    if not s: return 0.0
     
-    # 2. Troca a vírgula decimal por ponto (Ex: 1500,00 -> 1500.00)
-    s = s.replace(',', '.')
-    
+    # Lógica Brasileira:
+    # Se tem vírgula, ela é o decimal. O ponto é milhar (lixo).
+    if ',' in s:
+        s = s.replace('.', '') # Tira milhar (1.500 -> 1500)
+        s = s.replace(',', '.') # Vira float (1500,00 -> 1500.00)
+    else:
+        # Se NÃO tem vírgula, assumimos que ponto é decimal (Padrão Python)
+        # Ou é um número inteiro
+        pass
+        
     try:
         return float(s)
     except:
         return 0.0
 
-def limpar_valor_monetario(valor):
-    """Lê do Google Sheets (que pode vir bagunçado) e padroniza"""
-    return converter_input_para_float(valor)
+def formatar_moeda_visual(valor):
+    """Transforma 1500.00 em 'R$ 1.500,00' para exibição"""
+    if pd.isna(valor): return "R$ 0,00"
+    try:
+        val = float(valor)
+        return f"R$ {val:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    except: return "R$ 0,00"
 
 def formatar_documento(valor):
     if pd.isna(valor) or str(valor).strip() == '': return "-"
@@ -98,17 +106,20 @@ def carregar_dados_completos():
     spreadsheet = conectar_google_sheets()
     if spreadsheet is None: return None, None, None
     try:
+        # Config
         try:
             sheet_config = spreadsheet.worksheet("Config_Equipe")
             df_config = pd.DataFrame(sheet_config.get_all_records())
             for col in df_config.columns: df_config[col] = df_config[col].astype(str)
         except: return None, None, None
 
+        # Clientes
         try:
             sheet_clientes = spreadsheet.worksheet("Clientes")
             df_protheus = pd.DataFrame(sheet_clientes.get_all_records())
         except: return None, None, None
         
+        # Leads
         try:
             sheet_leads = spreadsheet.worksheet("Novos_Leads")
             dados_leads = sheet_leads.get_all_records()
@@ -126,17 +137,21 @@ def carregar_dados_completos():
             df_clientes['ID_Cliente_CNPJ_CPF'] = df_clientes['ID_Cliente_CNPJ_CPF'].astype(str)
             if 'Ultimo_Vendedor' in df_clientes.columns:
                 df_clientes['Ultimo_Vendedor'] = df_clientes['Ultimo_Vendedor'].astype(str).str.strip()
+            # Limpeza Total Compras
             if 'Total_Compras' in df_clientes.columns:
                 df_clientes['Total_Compras'] = df_clientes['Total_Compras'].apply(limpar_valor_monetario)
             if 'Data_Ultima_Compra' in df_clientes.columns:
                 df_clientes['Data_Ultima_Compra'] = pd.to_datetime(df_clientes['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
         
+        # Interações
         try:
             sheet_interacoes = spreadsheet.worksheet("Interacoes")
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
             if not df_interacoes.empty:
+                # Limpeza Valor Proposta
                 if 'Valor_Proposta' in df_interacoes.columns:
                     df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].apply(limpar_valor_monetario)
+                
                 if 'Data' in df_interacoes.columns:
                     df_interacoes['Data_Obj'] = pd.to_datetime(df_interacoes['Data'], dayfirst=True, errors='coerce').dt.date
                 if 'CNPJ_Cliente' in df_interacoes.columns:
@@ -152,28 +167,33 @@ def carregar_dados_completos():
         return None, None, None
 
 # --- SALVAMENTO ---
-def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_str_input):
+def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_bruto):
     try:
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
         data_str = data_obj.strftime('%d/%m/%Y')
         
-        # CONVERSÃO ROBUSTA DO INPUT DE TEXTO
-        valor_float = converter_input_para_float(valor_str_input)
-        # Transforma de volta em String padrão BR para a Planilha (1000,50)
-        valor_final_sheet = f"{valor_float:.2f}".replace('.', ',')
+        # Converte para float puro antes de salvar
+        valor_float = limpar_valor_monetario(valor_bruto)
+        # Salva formatado com vírgula para a planilha visual
+        valor_save = f"{valor_float:.2f}".replace('.', ',')
         
-        id_prop = f"#{gerar_id_proposta()}" if tipo == "Orçamento Enviado" else ""
-        resumo_final = f"{id_prop} {resumo}" if id_prop else resumo
+        # Se for orçamento, gera ID. Se for venda, tenta manter ID do resumo
+        id_prop = ""
+        if tipo == "Orçamento Enviado":
+            id_prop = f"#{gerar_id_proposta()}"
+            resumo_final = f"{id_prop} {resumo}"
+        else:
+            resumo_final = resumo
 
-        sheet.append_row([str(cnpj), data_str, tipo, resumo_final, vendedor, valor_final_sheet])
+        sheet.append_row([str(cnpj), data_str, tipo, resumo_final, vendedor, valor_save])
         st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"Erro Salvar: {e}")
         return False
 
-def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, primeira_acao, resumo_inicial, valor_str_input):
+def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, primeira_acao, resumo_inicial, valor_bruto):
     try:
         spreadsheet = conectar_google_sheets()
         sheet_leads = spreadsheet.worksheet("Novos_Leads")
@@ -182,13 +202,13 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         sheet_interacoes = spreadsheet.worksheet("Interacoes")
         data_str = datetime.now().strftime('%d/%m/%Y')
         
-        valor_float = converter_input_para_float(valor_str_input)
-        valor_final_sheet = f"{valor_float:.2f}".replace('.', ',')
+        valor_float = limpar_valor_monetario(valor_bruto)
+        valor_save = f"{valor_float:.2f}".replace('.', ',')
         
         id_prop = f"#{gerar_id_proposta()}" if primeira_acao == "Orçamento Enviado" else ""
         resumo_final = f"{id_prop} {resumo_inicial}" if id_prop else resumo_inicial
         
-        sheet_interacoes.append_row([str(cnpj), data_str, primeira_acao, resumo_final, vendedor, valor_final_sheet])
+        sheet_interacoes.append_row([str(cnpj), data_str, primeira_acao, resumo_final, vendedor, valor_save])
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -199,28 +219,42 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
 def processar_salvamento_lead(usuario_logado):
     nome = st.session_state["novo_nome"]
     doc = st.session_state["novo_doc"]
-    # AGORA VAL É STRING
-    val = st.session_state["novo_val"] 
+    val = st.session_state["novo_val"]
     if not nome or not doc: st.error("Campos obrigatórios!")
     else:
         if salvar_novo_lead_completo(doc, nome, st.session_state["novo_contato"], st.session_state["novo_tel"], usuario_logado, st.session_state["novo_origem"], st.session_state["novo_acao"], st.session_state["novo_resumo"], val):
             st.success("Salvo!")
             st.session_state["novo_nome"] = ""
             st.session_state["novo_doc"] = ""
-            st.session_state["novo_val"] = "0,00" # Reseta como string
+            st.session_state["novo_val"] = "0,00"
 
 def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
     obs = st.session_state["obs_temp"]
-    # AGORA VAL É STRING
     val = st.session_state["val_temp"]
     if salvar_interacao_nuvem(cid, datetime.now(), tipo_selecionado, obs, usuario_logado, val):
         st.success("Salvo!")
         st.session_state["obs_temp"] = ""
-        st.session_state["val_temp"] = "0,00" # Reseta como string
+        st.session_state["val_temp"] = "0,00"
+
+def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
+    # Callback para os botões de fechar proposta
+    valor = proposta_row['Valor_Proposta']
+    resumo_orig = proposta_row['Resumo']
+    
+    # Tenta extrair ID do resumo original
+    match = re.search(r'(#[A-Z0-9]{4})', str(resumo_orig))
+    id_ref = match.group(1) if match else "(S/ ID)"
+    
+    obs = f"Fechamento da Proposta {id_ref}. Detalhes: {resumo_orig}"
+    
+    if salvar_interacao_nuvem(cid, datetime.now(), status_novo, obs, usuario_logado, valor):
+        st.success(f"Proposta {status_novo}!")
+        time.sleep(1) # Dá um tempinho para ver a msg
+        st.rerun()
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 9.6")
+    st.sidebar.title("🚀 CRM Master 10.0")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -282,21 +316,27 @@ try:
             with st.sidebar.expander("➕ Cadastrar Novo Lead"):
                 for k in ["novo_nome", "novo_doc", "novo_contato", "novo_tel", "novo_resumo"]:
                     if k not in st.session_state: st.session_state[k] = ""
-                # AGORA É STRING "0,00"
+                # Valor inicia como string "0,00"
                 if "novo_val" not in st.session_state: st.session_state["novo_val"] = "0,00"
                 if "novo_origem" not in st.session_state: st.session_state["novo_origem"] = "SELECIONE..."
                 if "novo_acao" not in st.session_state: st.session_state["novo_acao"] = "SELECIONE..."
 
                 st.text_input("Nome:", key="novo_nome")
                 st.text_input("CPF/CNPJ:", key="novo_doc")
-                st.text_input("Contato:", key="novo_contato")
-                st.text_input("Telefone:", key="novo_tel")
                 c1, c2 = st.columns(2)
-                c1.selectbox("Origem:", ["SELECIONE...", "SZ.CHAT", "LIGAÇÃO", "PRESENCIAL", "E-MAIL", "INDICAÇÃO"], key="novo_origem")
-                c2.selectbox("Ação:", ["SELECIONE...", "Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"], key="novo_acao")
+                c1.text_input("Contato:", key="novo_contato")
+                c2.text_input("Telefone:", key="novo_tel")
+                
+                c3, c4 = st.columns(2)
+                c3.selectbox("Origem:", ["SELECIONE...", "SZ.CHAT", "LIGAÇÃO", "PRESENCIAL", "E-MAIL", "INDICAÇÃO"], key="novo_origem")
+                c4.selectbox("Ação:", ["SELECIONE...", "Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"], key="novo_acao")
+                
                 if st.session_state["novo_acao"] == "Orçamento Enviado":
-                    # TEXT_INPUT NO LUGAR DE NUMBER_INPUT
-                    st.text_input("Valor (R$):", key="novo_val", help="Digite o valor com vírgula para centavos. Ex: 1500,00")
+                    # INPUT DE TEXTO COM FEEDBACK IMEDIATO
+                    val_input = st.text_input("Valor (R$):", key="novo_val", help="Ex: 1500,00")
+                    val_reconhecido = limpar_valor_monetario(val_input)
+                    st.caption(f"💡 O sistema entendeu: **{formatar_moeda_visual(val_reconhecido)}**")
+
                 st.text_area("Resumo:", key="novo_resumo")
                 st.button("💾 SALVAR LEAD", type="primary", on_click=processar_salvamento_lead, args=(usuario_logado,))
 
@@ -407,27 +447,70 @@ try:
                             col_d2.write(f"**📅 Compra:** {formatar_data_br(cli.get('Data_Ultima_Compra', '-'))}")
                             st.divider()
                             
-                            st.markdown("#### 📜 Últimas Interações")
-                            if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
-                                hist = df_interacoes[df_interacoes['CNPJ_Cliente'] == str(cid)]
-                                if not hist.empty:
-                                    hist_view = hist.iloc[::-1][['Data_Obj', 'Tipo', 'Resumo', 'Valor_Proposta']].head(5)
-                                    hist_view.rename(columns={'Data_Obj': 'Data', 'Valor_Proposta': 'Valor'}, inplace=True)
-                                    hist_view['Valor'] = hist_view['Valor'].apply(formatar_moeda_visual)
-                                    hist_view['Data'] = hist_view['Data'].apply(formatar_data_br)
-                                    st.dataframe(hist_view, hide_index=True, use_container_width=True)
+                            # --- ABAS DE AÇÃO ---
+                            tab_hist, tab_prop, tab_nova = st.tabs(["📜 Histórico", "💰 Propostas Abertas", "📝 Nova Ação"])
                             
-                            st.divider()
-                            st.markdown("#### 📝 Nova Interação")
-                            if "obs_temp" not in st.session_state: st.session_state["obs_temp"] = ""
-                            if "val_temp" not in st.session_state: st.session_state["val_temp"] = "0,00"
-                            
-                            tipo = st.selectbox("Ação:", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Venda Fechada", "Venda Perdida", "Agendou Visita"])
-                            if tipo in ["Orçamento Enviado", "Venda Fechada", "Venda Perdida"]:
-                                # TEXT_INPUT NO LUGAR DE NUMBER_INPUT
-                                st.text_input("Valor (R$):", key="val_temp", help="Digite o valor com vírgula. Ex: 1000,50")
-                            st.text_area("Obs:", key="obs_temp")
-                            st.button("✅ Salvar", type="primary", on_click=processar_salvamento_vendedor, args=(cid, usuario_logado, tipo))
+                            # TAB 1: HISTÓRICO SIMPLES
+                            with tab_hist:
+                                if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
+                                    hist = df_interacoes[df_interacoes['CNPJ_Cliente'] == str(cid)]
+                                    if not hist.empty:
+                                        hist_view = hist.iloc[::-1][['Data_Obj', 'Tipo', 'Resumo', 'Valor_Proposta']].head(10)
+                                        hist_view.rename(columns={'Data_Obj': 'Data', 'Valor_Proposta': 'Valor'}, inplace=True)
+                                        hist_view['Valor'] = hist_view['Valor'].apply(formatar_moeda_visual)
+                                        hist_view['Data'] = hist_view['Data'].apply(formatar_data_br)
+                                        st.dataframe(hist_view, hide_index=True, use_container_width=True)
+                                    else: st.write("Nada aqui.")
+
+                            # TAB 2: PROPOSTAS ABERTAS (A MÁGICA ACONTECE AQUI)
+                            with tab_prop:
+                                if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
+                                    # Filtra propostas DESTE cliente
+                                    props = df_interacoes[
+                                        (df_interacoes['CNPJ_Cliente'] == str(cid)) & 
+                                        (df_interacoes['Tipo'] == 'Orçamento Enviado')
+                                    ].copy()
+                                    
+                                    # Tenta verificar se já não foi fechada (Lógica simples: verifica se ID está em alguma Venda Fechada)
+                                    # Para simplificar na V10: Mostra todas as de Orçamento, o user decide qual fechar.
+                                    
+                                    if not props.empty:
+                                        # Inverte ordem (mais recente em cima)
+                                        props = props.iloc[::-1]
+                                        
+                                        for index, row in props.iterrows():
+                                            with st.container(border=True):
+                                                c_p1, c_p2, c_p3 = st.columns([2, 1, 1])
+                                                dt_p = formatar_data_br(row['Data_Obj'])
+                                                val_p = formatar_moeda_visual(row['Valor_Proposta'])
+                                                resumo_p = row['Resumo']
+                                                
+                                                c_p1.markdown(f"**{dt_p}** | {val_p}")
+                                                c_p1.caption(f"{resumo_p}")
+                                                
+                                                if c_p2.button("✅ FECHAR", key=f"btn_win_{index}"):
+                                                    fechar_proposta_automatica(cid, usuario_logado, row, "Venda Fechada")
+                                                    
+                                                if c_p3.button("❌ PERDER", key=f"btn_loss_{index}"):
+                                                    fechar_proposta_automatica(cid, usuario_logado, row, "Venda Perdida")
+                                    else:
+                                        st.info("Nenhum orçamento em aberto encontrado.")
+
+                            # TAB 3: NOVA AÇÃO GENÉRICA
+                            with tab_nova:
+                                tipo = st.selectbox("Ação:", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
+                                
+                                if tipo == "Orçamento Enviado":
+                                    val_input = st.text_input("Valor (R$):", key="val_temp", help="Ex: 1500,00")
+                                    # Feedback Visual Imediato
+                                    val_reconhecido = limpar_valor_monetario(val_input)
+                                    st.caption(f"💡 O sistema entendeu: **{formatar_moeda_visual(val_reconhecido)}**")
+                                else:
+                                    # Se não é orçamento, valor é zero internamente (mas precisamos resetar o input visual)
+                                    if "val_temp" not in st.session_state: st.session_state["val_temp"] = "0,00"
+                                    
+                                st.text_area("Obs:", key="obs_temp")
+                                st.button("✅ Salvar Nova Interação", type="primary", on_click=processar_salvamento_vendedor, args=(cid, usuario_logado, tipo))
 
 except Exception as e:
     st.error(f"Erro Fatal: {e}")
