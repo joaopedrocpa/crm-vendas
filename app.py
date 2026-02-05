@@ -7,11 +7,12 @@ import json
 import random
 import string
 import re
+import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 11.0", layout="wide")
+st.set_page_config(page_title="CRM Master 12.0", layout="wide")
 
-# --- CSS (VISUAL DARK & CARDS) ---
+# --- CSS (VISUAL DARK) ---
 st.markdown("""
 <style>
     [data-testid="stSidebar"] {min-width: 300px;}
@@ -32,43 +33,43 @@ st.markdown("""
 def gerar_id_proposta():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
-def limpar_valor_monetario(valor):
+def limpar_valor_inteiro(valor):
     """
-    FUNÇÃO DE LIMPEZA BRUTAL (CORREÇÃO DEFINITIVA)
-    Objetivo: Transformar qualquer input brasileiro em Float Python seguro.
+    FORÇA BRUTA PARA INTEIRO.
+    Remove centavos, remove pontos, remove vírgulas.
+    Ex: '1.500,50' vira 1500
+    Ex: 1500.99 vira 1500
     """
-    if pd.isna(valor) or str(valor).strip() == '': return 0.0
+    if pd.isna(valor) or str(valor).strip() == '': return 0
     
-    # 1. Converte para string e remove R$ e espaços
+    # Se já for número (int ou float), converte pra int direto
+    if isinstance(valor, (int, float)):
+        return int(valor)
+    
     s = str(valor).upper().replace('R$', '').strip()
     
-    # 2. Se for um número puro (vindo do Excel/Google), retorna
-    if isinstance(valor, (int, float)): return float(valor)
-    
-    # 3. Lógica Brasileira Explícita
-    # Se tem vírgula, assumimos que é o separador decimal (centavos)
+    # Se tiver vírgula, a gente assume que é separador decimal e joga fora o que tem depois
     if ',' in s:
-        # Removemos TODOS os pontos (que são apenas estéticos para milhar)
-        s = s.replace('.', '')
-        # Trocamos a vírgula por ponto (para o Python entender)
-        s = s.replace(',', '.')
-    else:
-        # Se NÃO tem vírgula, assumimos que é um número inteiro ou float padrão
-        # Ex: "1500" ou "1500.50" (formato americano raro, mas possível)
-        pass
-        
-    try:
-        return float(s)
-    except:
-        return 0.0
+        s = s.split(',')[0] # Pega só a parte inteira antes da vírgula
+    
+    # Remove pontos de milhar
+    s = s.replace('.', '')
+    
+    # Remove qualquer lixo que sobrou
+    s = re.sub(r'[^\d]', '', s)
+    
+    if not s: return 0
+    
+    return int(s)
 
 def formatar_moeda_visual(valor):
-    """Exibe float como R$ (Visual apenas)"""
-    if pd.isna(valor): return "R$ 0,00"
+    """Exibe Inteiro como Moeda (R$ 1.500)"""
+    if pd.isna(valor): return "R$ 0"
     try:
-        val = float(valor)
-        return f"R$ {val:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-    except: return "R$ 0,00"
+        val = int(valor)
+        # Formata com ponto de milhar padrão (1.500)
+        return f"R$ {val:,.0f}".replace(',', '.')
+    except: return "R$ 0"
 
 def formatar_documento(valor):
     if pd.isna(valor) or str(valor).strip() == '': return "-"
@@ -136,9 +137,9 @@ def carregar_dados_completos():
             df_clientes['ID_Cliente_CNPJ_CPF'] = df_clientes['ID_Cliente_CNPJ_CPF'].astype(str)
             if 'Ultimo_Vendedor' in df_clientes.columns:
                 df_clientes['Ultimo_Vendedor'] = df_clientes['Ultimo_Vendedor'].astype(str).str.strip()
-            # Limpeza Total Compras
+            # Limpeza Total Compras (Inteiro)
             if 'Total_Compras' in df_clientes.columns:
-                df_clientes['Total_Compras'] = df_clientes['Total_Compras'].apply(limpar_valor_monetario)
+                df_clientes['Total_Compras'] = df_clientes['Total_Compras'].apply(limpar_valor_inteiro)
             if 'Data_Ultima_Compra' in df_clientes.columns:
                 df_clientes['Data_Ultima_Compra'] = pd.to_datetime(df_clientes['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
         
@@ -147,9 +148,9 @@ def carregar_dados_completos():
             sheet_interacoes = spreadsheet.worksheet("Interacoes")
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
             if not df_interacoes.empty:
-                # Limpeza Valor Proposta
+                # Limpeza Valor Proposta (Inteiro)
                 if 'Valor_Proposta' in df_interacoes.columns:
-                    df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].apply(limpar_valor_monetario)
+                    df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].apply(limpar_valor_inteiro)
                 
                 if 'Data' in df_interacoes.columns:
                     df_interacoes['Data_Obj'] = pd.to_datetime(df_interacoes['Data'], dayfirst=True, errors='coerce').dt.date
@@ -166,16 +167,14 @@ def carregar_dados_completos():
         return None, None, None
 
 # --- SALVAMENTO ---
-def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_bruto):
+def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_inteiro):
     try:
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
         data_str = data_obj.strftime('%d/%m/%Y')
         
-        # Converte para float puro (CÁLCULO)
-        valor_float = limpar_valor_monetario(valor_bruto)
-        # Formata para string BR para salvar na Planilha (VISUAL NO EXCEL)
-        valor_save = f"{valor_float:.2f}".replace('.', ',')
+        # GARANTIA: Envia Inteiro Puro
+        valor_save = int(valor_inteiro)
         
         id_prop = ""
         if tipo == "Orçamento Enviado":
@@ -191,7 +190,7 @@ def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_bruto):
         st.error(f"Erro Salvar: {e}")
         return False
 
-def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, primeira_acao, resumo_inicial, valor_bruto):
+def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, primeira_acao, resumo_inicial, valor_inteiro):
     try:
         spreadsheet = conectar_google_sheets()
         sheet_leads = spreadsheet.worksheet("Novos_Leads")
@@ -200,8 +199,7 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         sheet_interacoes = spreadsheet.worksheet("Interacoes")
         data_str = datetime.now().strftime('%d/%m/%Y')
         
-        valor_float = limpar_valor_monetario(valor_bruto)
-        valor_save = f"{valor_float:.2f}".replace('.', ',')
+        valor_save = int(valor_inteiro)
         
         id_prop = f"#{gerar_id_proposta()}" if primeira_acao == "Orçamento Enviado" else ""
         resumo_final = f"{id_prop} {resumo_inicial}" if id_prop else resumo_inicial
@@ -224,7 +222,7 @@ def processar_salvamento_lead(usuario_logado):
             st.success("Salvo!")
             st.session_state["novo_nome"] = ""
             st.session_state["novo_doc"] = ""
-            st.session_state["novo_val"] = "0,00"
+            st.session_state["novo_val"] = 0
 
 def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
     obs = st.session_state["obs_temp"]
@@ -232,16 +230,15 @@ def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
     if salvar_interacao_nuvem(cid, datetime.now(), tipo_selecionado, obs, usuario_logado, val):
         st.success("Salvo!")
         st.session_state["obs_temp"] = ""
-        st.session_state["val_temp"] = "0,00"
+        st.session_state["val_temp"] = 0
 
 def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
-    valor = proposta_row['Valor_Proposta']
+    valor = proposta_row['Valor_Proposta'] # Já vem como Inteiro do DataFrame limpo
     resumo_orig = proposta_row['Resumo']
     match = re.search(r'(#[A-Z0-9]{4})', str(resumo_orig))
     id_ref = match.group(1) if match else "(S/ ID)"
     obs = f"Fechamento da Proposta {id_ref}. Detalhes: {resumo_orig}"
     
-    # Passamos o valor float direto, pois já está limpo no dataframe
     if salvar_interacao_nuvem(cid, datetime.now(), status_novo, obs, usuario_logado, valor):
         st.success(f"Proposta {status_novo}!")
         time.sleep(1)
@@ -249,7 +246,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 11.0")
+    st.sidebar.title("🚀 CRM Master 12.0")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -280,25 +277,20 @@ try:
         tipo_usuario = str(user_data['Tipo']).upper().strip()
         carteiras_permitidas = [x.strip() for x in str(user_data['Carteira_Alvo']).split(',')]
 
-        # --- STATUS & CALCULO DO PIPELINE (NA MESA) ---
+        # STATUS & PIPELINE
         hoje = datetime.now().date()
         if 'Data_Ultima_Compra' in df.columns: df['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df['Data_Ultima_Compra']).dt.days
         else: df['Dias_Sem_Comprar'] = 0
 
-        # Dicionário para guardar o valor da última proposta de quem está em negociação
-        # Chave: CNPJ, Valor: Float
         clientes_em_negociacao_valores = {}
 
         def calcular_status(linha):
             cnpj = linha['ID_Cliente_CNPJ_CPF']
             cnpj_str = str(cnpj)
-            
-            # Default
             status_final = '🟢 ATIVO'
             if pd.isna(linha['Dias_Sem_Comprar']): status_final = '🆕 NOVO S/ INTERAÇÃO'
             elif linha['Dias_Sem_Comprar'] >= 60: status_final = '🔴 RECUPERAR'
 
-            # Verifica interações recentes
             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                 filtro = df_interacoes[df_interacoes['CNPJ_Cliente'] == cnpj_str]
                 if not filtro.empty:
@@ -308,18 +300,14 @@ try:
                             dias_acao = (hoje - ultima['Data_Obj']).days
                             if ultima['Tipo'] == 'Orçamento Enviado':
                                 status_final = '⚠️ FOLLOW-UP' if dias_acao >= 5 else '⏳ NEGOCIAÇÃO'
-                                # GUARDS O VALOR PARA O KPI "NA MESA"
                                 clientes_em_negociacao_valores[cnpj_str] = ultima['Valor_Proposta']
-                            
                             elif ultima['Tipo'] == 'Venda Fechada': status_final = '⭐ VENDA RECENTE'
                             elif ultima['Tipo'] == 'Venda Perdida': status_final = '👎 VENDA PERDIDA'
                             elif ultima['Tipo'] == 'Ligação Realizada': status_final = '📞 CONTATADO RECENTEMENTE'
                             elif ultima['Tipo'] == 'WhatsApp Enviado': status_final = '💬 WHATSAPP INICIADO'
                     except: pass
-            
             return status_final
         
-        # Aplica o status E popula o dicionário de valores em negociação
         df['Status'] = df.apply(calcular_status, axis=1)
 
         # CADASTRO
@@ -328,7 +316,8 @@ try:
             with st.sidebar.expander("➕ Cadastrar Novo Lead"):
                 for k in ["novo_nome", "novo_doc", "novo_contato", "novo_tel", "novo_resumo"]:
                     if k not in st.session_state: st.session_state[k] = ""
-                if "novo_val" not in st.session_state: st.session_state["novo_val"] = "0,00"
+                # VALOR INTEIRO (0)
+                if "novo_val" not in st.session_state: st.session_state["novo_val"] = 0
                 if "novo_origem" not in st.session_state: st.session_state["novo_origem"] = "SELECIONE..."
                 if "novo_acao" not in st.session_state: st.session_state["novo_acao"] = "SELECIONE..."
 
@@ -343,15 +332,13 @@ try:
                 c4.selectbox("Ação:", ["SELECIONE...", "Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"], key="novo_acao")
                 
                 if st.session_state["novo_acao"] == "Orçamento Enviado":
-                    val_input = st.text_input("Valor (R$):", key="novo_val", help="Digite com vírgula. Ex: 1.500,00")
-                    # ESPELHO DE CONFERÊNCIA
-                    val_reconhecido = limpar_valor_monetario(val_input)
-                    st.caption(f"🔵 O sistema vai salvar: **{formatar_moeda_visual(val_reconhecido)}**")
+                    # NUMBER INPUT COM STEP 1 (INTEIRO)
+                    st.number_input("Valor (R$ - Sem Centavos):", min_value=0, step=1, key="novo_val", help="Digite apenas o valor inteiro.")
 
                 st.text_area("Resumo:", key="novo_resumo")
                 st.button("💾 SALVAR LEAD", type="primary", on_click=processar_salvamento_lead, args=(usuario_logado,))
 
-        # FILTRAGEM GLOBAL
+        # FILTROS
         if "TODOS" in carteiras_permitidas:
             meus_clientes = df
             minhas_interacoes = df_interacoes
@@ -362,7 +349,7 @@ try:
                 minhas_interacoes = df_interacoes[df_interacoes['Vendedor'].isin(carteiras_permitidas)]
             else: minhas_interacoes = pd.DataFrame()
 
-        # --- VIEW GESTOR ---
+        # VIEW GESTOR
         if tipo_usuario == "GESTOR":
             st.title(f"📊 Gestão: {usuario_logado}")
             with st.container(border=True):
@@ -374,24 +361,22 @@ try:
                 opcoes_vendedores = minhas_interacoes['Vendedor'].unique().tolist() if not minhas_interacoes.empty else []
                 sel_vendedores = col_f4.multiselect("Vendedores:", options=opcoes_vendedores, default=opcoes_vendedores)
 
-            # CÁLCULO DOS KPIS REAIS
-            vlr_orcado = 0.0
-            vlr_fechado = 0.0
-            vlr_perdido = 0.0
-            vlr_pipeline = 0.0 # O que está na mesa
+            vlr_orcado = 0
+            vlr_fechado = 0
+            vlr_perdido = 0
+            vlr_pipeline = 0
             qtd_interacoes = 0
             
-            # 1. KPIs Baseados em Histórico (O que aconteceu na data selecionada)
             if not minhas_interacoes.empty and 'Data_Obj' in minhas_interacoes.columns:
                 mask_data = ((minhas_interacoes['Data_Obj'] >= d_ini) & (minhas_interacoes['Data_Obj'] <= d_fim))
                 if sel_vendedores: mask_data = mask_data & (minhas_interacoes['Vendedor'].isin(sel_vendedores))
                 
                 df_filtered = minhas_interacoes[mask_data].copy()
                 
-                vlr_orcado = df_filtered[df_filtered['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum()
-                vlr_perdido = df_filtered[df_filtered['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum()
-                vlr_fechado = df_filtered[df_filtered['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum()
-                qtd_interacoes = len(df_filtered) # Contagem total de linhas (esforço)
+                vlr_orcado = int(df_filtered[df_filtered['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum())
+                vlr_perdido = int(df_filtered[df_filtered['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum())
+                vlr_fechado = int(df_filtered[df_filtered['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum())
+                qtd_interacoes = len(df_filtered)
                 
                 if tipos_sel: df_tabela = df_filtered[df_filtered['Tipo'].isin(tipos_sel)]
                 else: df_tabela = df_filtered
@@ -399,9 +384,7 @@ try:
                 df_filtered = pd.DataFrame()
                 df_tabela = pd.DataFrame()
 
-            # 2. KPI Pipeline (O que está na mesa HOJE para esses vendedores)
-            # Logica: Pega os clientes que estão com status NEGOCIAÇÃO ou FOLLOW-UP e soma o valor
-            # Filtrar clientes dos vendedores selecionados (ou todos se nenhum selecionado)
+            # Pipeline
             if sel_vendedores:
                 clientes_alvo = meus_clientes[meus_clientes['Ultimo_Vendedor'].isin(sel_vendedores)]['ID_Cliente_CNPJ_CPF'].astype(str).tolist()
             else:
@@ -411,21 +394,20 @@ try:
                 if cnpj_key in clientes_alvo:
                     vlr_pipeline += val_negoc
 
-            # MOSTRANDO OS KPIS
             k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("💰 Total Orçado", formatar_moeda_visual(vlr_orcado), help="Soma de todos orçamentos enviados no período")
-            k2.metric("🔮 Na Mesa (Pipeline)", formatar_moeda_visual(vlr_pipeline), help="Soma das propostas ativas (Negociação/Follow-up) da carteira atual")
-            k3.metric("✅ Total Fechado", formatar_moeda_visual(vlr_fechado), help="Dinheiro ganho no período")
-            k4.metric("👎 Total Perdido", formatar_moeda_visual(vlr_perdido), help="Dinheiro perdido no período")
-            k5.metric("📞 Interações", f"{qtd_interacoes}", help="Quantidade de ações (Calls, Zaps, etc)")
+            k1.metric("💰 Orçado", formatar_moeda_visual(vlr_orcado))
+            k2.metric("🔮 Na Mesa", formatar_moeda_visual(vlr_pipeline))
+            k3.metric("✅ Fechado", formatar_moeda_visual(vlr_fechado))
+            k4.metric("👎 Perdido", formatar_moeda_visual(vlr_perdido))
+            k5.metric("📞 Interações", f"{qtd_interacoes}")
             
             st.divider()
-            t1, t2 = st.tabs(["🏆 Ranking Time", "📝 Detalhes"])
+            t1, t2 = st.tabs(["🏆 Ranking", "📝 Detalhes"])
             with t1:
                 if not df_filtered.empty:
                     df_filtered['Is_Orcamento'] = (df_filtered['Tipo'] == 'Orçamento Enviado').astype(int)
                     df_filtered['Is_Fechado'] = (df_filtered['Tipo'] == 'Venda Fechada').astype(int)
-                    df_filtered['Valor_Aux_Ranking'] = df_filtered.apply(lambda x: x['Valor_Proposta'] if x['Tipo'] == 'Venda Fechada' else 0.0, axis=1)
+                    df_filtered['Valor_Aux_Ranking'] = df_filtered.apply(lambda x: x['Valor_Proposta'] if x['Tipo'] == 'Venda Fechada' else 0, axis=1)
                     ranking = df_filtered.groupby('Vendedor').agg(Orcamentos=('Is_Orcamento', 'sum'), Fechados=('Is_Fechado', 'sum'), Total_Vendido=('Valor_Aux_Ranking', 'sum')).reset_index().sort_values('Total_Vendido', ascending=False)
                     ranking['Total_Vendido'] = ranking['Total_Vendido'].apply(formatar_moeda_visual)
                     st.dataframe(ranking, use_container_width=True)
@@ -438,7 +420,7 @@ try:
                     st.dataframe(view, use_container_width=True, hide_index=True, column_config={"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")})
                 else: st.info("Nenhuma interação.")
 
-        # --- VIEW VENDEDOR ---
+        # VIEW VENDEDOR
         else:
             st.title(f"💼 Vendas: {usuario_logado}")
             if meus_clientes.empty: st.warning("Nenhum cliente atribuído.")
@@ -479,7 +461,6 @@ try:
                             col_d2.write(f"**📅 Compra:** {formatar_data_br(cli.get('Data_Ultima_Compra', '-'))}")
                             st.divider()
                             
-                            # --- ABAS DE AÇÃO ---
                             tab_hist, tab_prop, tab_nova = st.tabs(["📜 Histórico", "💰 Propostas Abertas", "📝 Nova Ação"])
                             
                             with tab_hist:
@@ -515,12 +496,10 @@ try:
                             with tab_nova:
                                 tipo = st.selectbox("Ação:", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
                                 if tipo == "Orçamento Enviado":
-                                    val_input = st.text_input("Valor (R$):", key="val_temp", help="Ex: 1500,00")
-                                    # ESPELHO DE CONFERÊNCIA
-                                    val_reconhecido = limpar_valor_monetario(val_input)
-                                    st.caption(f"🔵 O sistema vai salvar: **{formatar_moeda_visual(val_reconhecido)}**")
+                                    # NUMBER INPUT INTEIRO
+                                    st.number_input("Valor (R$):", min_value=0, step=1, key="val_temp", help="Apenas números inteiros.")
                                 else:
-                                    if "val_temp" not in st.session_state: st.session_state["val_temp"] = "0,00"
+                                    if "val_temp" not in st.session_state: st.session_state["val_temp"] = 0
                                     
                                 st.text_area("Obs:", key="obs_temp")
                                 st.button("✅ Salvar Nova Interação", type="primary", on_click=processar_salvamento_vendedor, args=(cid, usuario_logado, tipo))
