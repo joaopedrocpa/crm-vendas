@@ -6,9 +6,10 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import random
 import string
+import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 9.5", layout="wide")
+st.set_page_config(page_title="CRM Master 9.6", layout="wide")
 
 # --- CSS (VISUAL DARK) ---
 st.markdown("""
@@ -30,32 +31,37 @@ def gerar_id_proposta():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
 def formatar_moeda_visual(valor):
+    """Formata apenas para exibir na tela (R$ 1.000,00)"""
     if pd.isna(valor) or str(valor).strip() == '': return "R$ 0,00"
     try:
         return f"R$ {float(valor):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
     except: return str(valor)
 
+def converter_input_para_float(valor_str):
+    """
+    RECEBE TEXTO (Ex: '1.500,50') E DEVOLVE FLOAT (1500.50)
+    Essa função é a responsável por corrigir o erro da vírgula.
+    """
+    if not valor_str: return 0.0
+    if isinstance(valor_str, (int, float)): return float(valor_str)
+    
+    # Remove R$ e espaços
+    s = str(valor_str).replace('R$', '').strip()
+    
+    # 1. Elimina os pontos de milhar (Ex: 1.500,00 -> 1500,00)
+    s = s.replace('.', '')
+    
+    # 2. Troca a vírgula decimal por ponto (Ex: 1500,00 -> 1500.00)
+    s = s.replace(',', '.')
+    
+    try:
+        return float(s)
+    except:
+        return 0.0
+
 def limpar_valor_monetario(valor):
-    """
-    CORREÇÃO DO ERRO DE 100x:
-    - Se vier 1024.35 (float ou str com ponto), mantém o ponto.
-    - Se vier 1.024,35 (str com vírgula), faz a conversão BR.
-    """
-    if pd.isna(valor): return 0.0
-    if isinstance(valor, (int, float)): return float(valor)
-    
-    s = str(valor).strip().replace('R$', '').strip()
-    if s == '': return 0.0
-    
-    # SE TIVER VÍRGULA, É FORMATO BRASILEIRO (1.000,00)
-    if ',' in s:
-        s = s.replace('.', '').replace(',', '.')
-    
-    # SE NÃO TEM VÍRGULA, ASSUMIMOS QUE É PADRÃO US OU INT (1000.00 ou 1000)
-    # Nesse caso, NÃO removemos o ponto, pois ele é decimal, não milhar.
-    
-    try: return float(s)
-    except: return 0.0
+    """Lê do Google Sheets (que pode vir bagunçado) e padroniza"""
+    return converter_input_para_float(valor)
 
 def formatar_documento(valor):
     if pd.isna(valor) or str(valor).strip() == '': return "-"
@@ -92,20 +98,17 @@ def carregar_dados_completos():
     spreadsheet = conectar_google_sheets()
     if spreadsheet is None: return None, None, None
     try:
-        # Config
         try:
             sheet_config = spreadsheet.worksheet("Config_Equipe")
             df_config = pd.DataFrame(sheet_config.get_all_records())
             for col in df_config.columns: df_config[col] = df_config[col].astype(str)
         except: return None, None, None
 
-        # Clientes
         try:
             sheet_clientes = spreadsheet.worksheet("Clientes")
             df_protheus = pd.DataFrame(sheet_clientes.get_all_records())
         except: return None, None, None
         
-        # Leads
         try:
             sheet_leads = spreadsheet.worksheet("Novos_Leads")
             dados_leads = sheet_leads.get_all_records()
@@ -128,7 +131,6 @@ def carregar_dados_completos():
             if 'Data_Ultima_Compra' in df_clientes.columns:
                 df_clientes['Data_Ultima_Compra'] = pd.to_datetime(df_clientes['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
         
-        # Interações
         try:
             sheet_interacoes = spreadsheet.worksheet("Interacoes")
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
@@ -150,27 +152,28 @@ def carregar_dados_completos():
         return None, None, None
 
 # --- SALVAMENTO ---
-def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor=0.0):
+def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_str_input):
     try:
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
         data_str = data_obj.strftime('%d/%m/%Y')
         
-        # Salva como Texto com Vírgula para o Excel entender Visualmente
-        valor_str = f"{float(valor):.2f}".replace('.', ',')
+        # CONVERSÃO ROBUSTA DO INPUT DE TEXTO
+        valor_float = converter_input_para_float(valor_str_input)
+        # Transforma de volta em String padrão BR para a Planilha (1000,50)
+        valor_final_sheet = f"{valor_float:.2f}".replace('.', ',')
         
-        # Lógica de ID para rastreamento
         id_prop = f"#{gerar_id_proposta()}" if tipo == "Orçamento Enviado" else ""
         resumo_final = f"{id_prop} {resumo}" if id_prop else resumo
 
-        sheet.append_row([str(cnpj), data_str, tipo, resumo_final, vendedor, valor_str])
+        sheet.append_row([str(cnpj), data_str, tipo, resumo_final, vendedor, valor_final_sheet])
         st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"Erro Salvar: {e}")
         return False
 
-def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, primeira_acao, resumo_inicial, valor_inicial=0.0):
+def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, primeira_acao, resumo_inicial, valor_str_input):
     try:
         spreadsheet = conectar_google_sheets()
         sheet_leads = spreadsheet.worksheet("Novos_Leads")
@@ -179,12 +182,13 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         sheet_interacoes = spreadsheet.worksheet("Interacoes")
         data_str = datetime.now().strftime('%d/%m/%Y')
         
-        valor_str = f"{float(valor_inicial):.2f}".replace('.', ',')
+        valor_float = converter_input_para_float(valor_str_input)
+        valor_final_sheet = f"{valor_float:.2f}".replace('.', ',')
         
         id_prop = f"#{gerar_id_proposta()}" if primeira_acao == "Orçamento Enviado" else ""
         resumo_final = f"{id_prop} {resumo_inicial}" if id_prop else resumo_inicial
         
-        sheet_interacoes.append_row([str(cnpj), data_str, primeira_acao, resumo_final, vendedor, valor_str])
+        sheet_interacoes.append_row([str(cnpj), data_str, primeira_acao, resumo_final, vendedor, valor_final_sheet])
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -195,26 +199,28 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
 def processar_salvamento_lead(usuario_logado):
     nome = st.session_state["novo_nome"]
     doc = st.session_state["novo_doc"]
-    val = st.session_state["novo_val"]
+    # AGORA VAL É STRING
+    val = st.session_state["novo_val"] 
     if not nome or not doc: st.error("Campos obrigatórios!")
     else:
         if salvar_novo_lead_completo(doc, nome, st.session_state["novo_contato"], st.session_state["novo_tel"], usuario_logado, st.session_state["novo_origem"], st.session_state["novo_acao"], st.session_state["novo_resumo"], val):
             st.success("Salvo!")
             st.session_state["novo_nome"] = ""
             st.session_state["novo_doc"] = ""
-            st.session_state["novo_val"] = 0.0
+            st.session_state["novo_val"] = "0,00" # Reseta como string
 
 def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
     obs = st.session_state["obs_temp"]
+    # AGORA VAL É STRING
     val = st.session_state["val_temp"]
     if salvar_interacao_nuvem(cid, datetime.now(), tipo_selecionado, obs, usuario_logado, val):
         st.success("Salvo!")
         st.session_state["obs_temp"] = ""
-        st.session_state["val_temp"] = 0.0
+        st.session_state["val_temp"] = "0,00" # Reseta como string
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 9.5")
+    st.sidebar.title("🚀 CRM Master 9.6")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -256,7 +262,6 @@ try:
                 cnpj_str = str(cnpj)
                 filtro = df_interacoes[df_interacoes['CNPJ_Cliente'] == cnpj_str]
                 if not filtro.empty:
-                    # Pega a última da lista (ordem de inserção)
                     ultima = filtro.iloc[-1]
                     try:
                         if pd.notna(ultima['Data_Obj']):
@@ -277,7 +282,8 @@ try:
             with st.sidebar.expander("➕ Cadastrar Novo Lead"):
                 for k in ["novo_nome", "novo_doc", "novo_contato", "novo_tel", "novo_resumo"]:
                     if k not in st.session_state: st.session_state[k] = ""
-                if "novo_val" not in st.session_state: st.session_state["novo_val"] = 0.0
+                # AGORA É STRING "0,00"
+                if "novo_val" not in st.session_state: st.session_state["novo_val"] = "0,00"
                 if "novo_origem" not in st.session_state: st.session_state["novo_origem"] = "SELECIONE..."
                 if "novo_acao" not in st.session_state: st.session_state["novo_acao"] = "SELECIONE..."
 
@@ -289,7 +295,8 @@ try:
                 c1.selectbox("Origem:", ["SELECIONE...", "SZ.CHAT", "LIGAÇÃO", "PRESENCIAL", "E-MAIL", "INDICAÇÃO"], key="novo_origem")
                 c2.selectbox("Ação:", ["SELECIONE...", "Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"], key="novo_acao")
                 if st.session_state["novo_acao"] == "Orçamento Enviado":
-                    st.number_input("Valor (R$):", step=0.01, format="%.2f", key="novo_val")
+                    # TEXT_INPUT NO LUGAR DE NUMBER_INPUT
+                    st.text_input("Valor (R$):", key="novo_val", help="Digite o valor com vírgula para centavos. Ex: 1500,00")
                 st.text_area("Resumo:", key="novo_resumo")
                 st.button("💾 SALVAR LEAD", type="primary", on_click=processar_salvamento_lead, args=(usuario_logado,))
 
@@ -404,7 +411,6 @@ try:
                             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                                 hist = df_interacoes[df_interacoes['CNPJ_Cliente'] == str(cid)]
                                 if not hist.empty:
-                                    # INVERTE A ORDEM PARA MOSTRAR MAIS RECENTE PRIMEIRO
                                     hist_view = hist.iloc[::-1][['Data_Obj', 'Tipo', 'Resumo', 'Valor_Proposta']].head(5)
                                     hist_view.rename(columns={'Data_Obj': 'Data', 'Valor_Proposta': 'Valor'}, inplace=True)
                                     hist_view['Valor'] = hist_view['Valor'].apply(formatar_moeda_visual)
@@ -414,11 +420,12 @@ try:
                             st.divider()
                             st.markdown("#### 📝 Nova Interação")
                             if "obs_temp" not in st.session_state: st.session_state["obs_temp"] = ""
-                            if "val_temp" not in st.session_state: st.session_state["val_temp"] = 0.0
+                            if "val_temp" not in st.session_state: st.session_state["val_temp"] = "0,00"
                             
                             tipo = st.selectbox("Ação:", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Venda Fechada", "Venda Perdida", "Agendou Visita"])
                             if tipo in ["Orçamento Enviado", "Venda Fechada", "Venda Perdida"]:
-                                st.number_input("Valor (R$):", step=0.01, format="%.2f", key="val_temp")
+                                # TEXT_INPUT NO LUGAR DE NUMBER_INPUT
+                                st.text_input("Valor (R$):", key="val_temp", help="Digite o valor com vírgula. Ex: 1000,50")
                             st.text_area("Obs:", key="obs_temp")
                             st.button("✅ Salvar", type="primary", on_click=processar_salvamento_vendedor, args=(cid, usuario_logado, tipo))
 
