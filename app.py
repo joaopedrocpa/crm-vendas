@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 17.0", layout="wide")
+st.set_page_config(page_title="CRM Master 18.0", layout="wide")
 
 # --- CSS (VISUAL DARK) ---
 st.markdown("""
@@ -37,6 +37,12 @@ def extrair_id(texto):
     """Procura por padrão #A1B2 no texto"""
     if pd.isna(texto): return None
     match = re.search(r'(#[A-Z0-9]{4})', str(texto))
+    return match.group(1) if match else None
+
+def extrair_pedido_protheus(texto):
+    """Procura por [PROTHEUS] Pedido: XXXXX"""
+    if pd.isna(texto): return None
+    match = re.search(r'\[PROTHEUS\] Pedido: (\w+)', str(texto))
     return match.group(1) if match else None
 
 def limpar_valor_inteiro(valor):
@@ -125,7 +131,6 @@ def carregar_dados_completos():
             df_clientes['ID_Cliente_CNPJ_CPF'] = df_clientes['ID_Cliente_CNPJ_CPF'].astype(str)
             if 'Ultimo_Vendedor' in df_clientes.columns:
                 df_clientes['Ultimo_Vendedor'] = df_clientes['Ultimo_Vendedor'].astype(str).str.strip()
-            # Limpeza Total Compras (Inteiro)
             if 'Total_Compras' in df_clientes.columns:
                 df_clientes['Total_Compras'] = df_clientes['Total_Compras'].apply(limpar_valor_inteiro)
             if 'Data_Ultima_Compra' in df_clientes.columns:
@@ -136,7 +141,6 @@ def carregar_dados_completos():
             sheet_interacoes = spreadsheet.worksheet("Interacoes")
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
             if not df_interacoes.empty:
-                # Limpeza Valor Proposta (Inteiro)
                 if 'Valor_Proposta' in df_interacoes.columns:
                     df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].apply(limpar_valor_inteiro)
                 
@@ -163,7 +167,6 @@ def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_inteiro
         valor_save = int(valor_inteiro)
         
         id_prop = ""
-        # Gera ID se for Orçamento
         if tipo == "Orçamento Enviado":
             id_prop = f"#{gerar_id_proposta()}"
             resumo_final = f"{id_prop} {resumo}"
@@ -197,78 +200,109 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         st.error(f"Erro Lead: {e}")
         return False
 
-# --- IMPORTAÇÃO PROTHEUS ---
+# --- IMPORTAÇÃO PROTHEUS INTELIGENTE (Sincronização) ---
 def processar_arquivo_protheus(uploaded_file, df_existente):
     try:
         df_import = pd.read_excel(uploaded_file)
         
-        # Validação básica de colunas
         cols_necessarias = ['DATA', 'CNPJ', 'VENDEDOR', 'VALOR', 'PEDIDO', 'STATUS']
         if not all(col in df_import.columns for col in cols_necessarias):
             return False, f"Arquivo inválido! Colunas necessárias: {cols_necessarias}"
         
         novas_linhas = []
-        contador = 0
+        contador_novos = 0
+        contador_atualizados = 0
         pulos = 0
         
-        # Prepara lista de pedidos já existentes para não duplicar
-        # Procura por "[PROTHEUS] Pedido: 123" no resumo
-        pedidos_existentes = set()
+        # 1. MAPEAR O ESTADO ATUAL DOS PEDIDOS NO CRM
+        # Dicionário: { 'PEDIDO_123': {'valor': 1000, 'tipo': 'Orçamento Enviado'} }
+        estado_crm = {}
         if not df_existente.empty:
-            for resumo in df_existente['Resumo'].astype(str):
-                match = re.search(r'\[PROTHEUS\] Pedido: (\w+)', resumo)
-                if match:
-                    pedidos_existentes.add(match.group(1))
+            # Ordena por data para garantir que pegamos o último status de cada pedido
+            df_sorted = df_existente.sort_values('Data_Obj', ascending=True)
+            for _, row in df_sorted.iterrows():
+                ped_id = extrair_pedido_protheus(row['Resumo'])
+                if ped_id:
+                    estado_crm[str(ped_id)] = {
+                        'valor': row['Valor_Proposta'],
+                        'tipo': row['Tipo']
+                    }
 
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
         
         for index, row in df_import.iterrows():
             pedido_id = str(row['PEDIDO']).strip()
+            valor_novo = limpar_valor_inteiro(row['VALOR'])
             
-            # Checa duplicidade
-            if pedido_id in pedidos_existentes:
-                pulos += 1
-                continue
-            
-            # Tradução de Dados
-            cnpj = ''.join(filter(str.isdigit, str(row['CNPJ']))) # Limpa CNPJ
-            
-            # Trata Data
-            try: data_obj = pd.to_datetime(row['DATA']).strftime('%d/%m/%Y')
-            except: data_obj = datetime.now().strftime('%d/%m/%Y')
-            
-            # Trata Valor
-            valor_limpo = limpar_valor_inteiro(row['VALOR'])
-            
-            # Trata Status -> Tipo CRM
+            # Normalização de Status Protheus -> CRM
             status_orig = str(row['STATUS']).upper().strip()
-            tipo_crm = "Orçamento Enviado" # Default
+            tipo_novo = "Orçamento Enviado"
             if "FECHADO" in status_orig or "FATURADO" in status_orig:
-                tipo_crm = "Venda Fechada"
+                tipo_novo = "Venda Fechada"
             elif "CANCELADO" in status_orig:
-                tipo_crm = "Venda Perdida"
+                tipo_novo = "Venda Perdida"
+                
+            # --- LÓGICA DE DECISÃO ---
+            acao_necessaria = False
+            motivo_atualizacao = ""
             
-            # Gera ID CRM apenas se for Orçamento
-            crm_id_tag = f"#{gerar_id_proposta()} " if tipo_crm == "Orçamento Enviado" else ""
-            resumo_final = f"{crm_id_tag}[PROTHEUS] Pedido: {pedido_id} | Status: {status_orig}"
+            if pedido_id not in estado_crm:
+                # Caso 1: Pedido Novo
+                acao_necessaria = True
+                contador_novos += 1
+            else:
+                # Caso 2: Pedido Existe - Verificar Alterações
+                dados_antigos = estado_crm[pedido_id]
+                val_antigo = dados_antigos['valor']
+                tipo_antigo = dados_antigos['tipo']
+                
+                # Checa mudança de Valor (Diferença > R$ 1)
+                if abs(valor_novo - val_antigo) > 1 and tipo_novo == "Orçamento Enviado":
+                    # Só atualiza valor se ainda for orçamento. Se já fechou, não mexe.
+                    if tipo_antigo == "Orçamento Enviado":
+                        acao_necessaria = True
+                        motivo_atualizacao = f"Atualização de Valor (Era {val_antigo})"
+                        contador_atualizados += 1
+                
+                # Checa mudança de Status (Aberto -> Fechado/Perdido)
+                if tipo_novo != "Orçamento Enviado" and tipo_antigo == "Orçamento Enviado":
+                    acao_necessaria = True
+                    motivo_atualizacao = "Baixa Automática Protheus"
+                    contador_atualizados += 1
             
-            novas_linhas.append([
-                cnpj, 
-                data_obj, 
-                tipo_crm, 
-                resumo_final, 
-                str(row['VENDEDOR']).upper().strip(), 
-                valor_limpo
-            ])
-            contador += 1
+            # --- EXECUÇÃO ---
+            if acao_necessaria:
+                cnpj = ''.join(filter(str.isdigit, str(row['CNPJ'])))
+                try: data_obj = pd.to_datetime(row['DATA']).strftime('%d/%m/%Y')
+                except: data_obj = datetime.now().strftime('%d/%m/%Y')
+                
+                # Gera ID CRM apenas se for Novo Orçamento
+                crm_id_tag = f"#{gerar_id_proposta()} " if tipo_novo == "Orçamento Enviado" and pedido_id not in estado_crm else ""
+                
+                # Se for atualização, tenta manter o ID do CRM? Difícil sem query complexa.
+                # Simplificação V18: Atualizações ganham tag PROTHEUS e o sistema agrupa pelo Pedido.
+                
+                resumo_txt = f"{crm_id_tag}[PROTHEUS] Pedido: {pedido_id} | {status_orig}"
+                if motivo_atualizacao: resumo_txt += f" | {motivo_atualizacao}"
+                
+                novas_linhas.append([
+                    cnpj, 
+                    data_obj, 
+                    tipo_novo, 
+                    resumo_txt, 
+                    str(row['VENDEDOR']).upper().strip(), 
+                    valor_novo
+                ])
+            else:
+                pulos += 1
             
         if novas_linhas:
             sheet.append_rows(novas_linhas)
             st.cache_data.clear()
-            return True, f"Sucesso! {contador} pedidos importados. {pulos} duplicados ignorados."
+            return True, f"Importação: {contador_novos} Novos | {contador_atualizados} Atualizados | {pulos} Sem Mudança."
         else:
-            return True, f"Nenhum pedido novo encontrado. {pulos} duplicados."
+            return True, f"Tudo sincronizado. Nenhuma alteração encontrada."
             
     except Exception as e:
         return False, f"Erro no processamento: {e}"
@@ -312,7 +346,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 17.0")
+    st.sidebar.title("🚀 CRM Master 18.0")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -348,13 +382,18 @@ try:
         if 'Data_Ultima_Compra' in df.columns: df['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df['Data_Ultima_Compra']).dt.days
         else: df['Dias_Sem_Comprar'] = 0
 
-        # --- PREPARA LISTA DE IDs JÁ RESOLVIDOS (GLOBAL) ---
-        ids_resolvidos = []
+        # --- PREPARAÇÃO DE DADOS (GLOBAL) ---
+        ids_resolvidos = [] # IDs #A1B2 do CRM
+        pedidos_baixados_protheus = set() # Pedidos PROTHEUS já fechados
+        
         if not df_interacoes.empty and 'Resumo' in df_interacoes.columns:
+            # Identifica baixas
             resolvidos = df_interacoes[df_interacoes['Tipo'].isin(['Venda Fechada', 'Venda Perdida'])]
             for texto in resolvidos['Resumo'].astype(str):
                 id_enc = extrair_id(texto)
                 if id_enc: ids_resolvidos.append(id_enc)
+                ped_enc = extrair_pedido_protheus(texto)
+                if ped_enc: pedidos_baixados_protheus.add(ped_enc)
 
         def calcular_status(linha):
             cnpj = linha['ID_Cliente_CNPJ_CPF']
@@ -371,8 +410,14 @@ try:
                     orcamentos = filtro[filtro['Tipo'] == 'Orçamento Enviado']
                     for _, row in orcamentos.iterrows():
                         meu_id = extrair_id(row['Resumo'])
-                        # Se não tem ID ou ID não foi resolvido -> Está Aberta
-                        if not meu_id or (meu_id and meu_id not in ids_resolvidos):
+                        meu_pedido = extrair_pedido_protheus(row['Resumo'])
+                        
+                        # Checa se está aberto (Nem ID CRM baixado, nem Pedido Protheus baixado)
+                        esta_resolvido = False
+                        if meu_id and meu_id in ids_resolvidos: esta_resolvido = True
+                        if meu_pedido and meu_pedido in pedidos_baixados_protheus: esta_resolvido = True
+                        
+                        if not esta_resolvido:
                             tem_proposta_aberta = True
                     
                     if tem_proposta_aberta:
@@ -465,24 +510,43 @@ try:
             qtd_interacoes = 0
             
             if not minhas_interacoes.empty and 'Data_Obj' in minhas_interacoes.columns:
-                # 1. Filtro de Data e Vendedor
                 mask_data = ((minhas_interacoes['Data_Obj'] >= d_ini) & (minhas_interacoes['Data_Obj'] <= d_fim))
                 if sel_vendedores: mask_data = mask_data & (minhas_interacoes['Vendedor'].isin(sel_vendedores))
                 
                 df_filtered = minhas_interacoes[mask_data].copy()
                 
-                # 2. KPIs Simples (Soma direta)
+                # KPIs Simples (Soma direta)
                 vlr_orcado = int(df_filtered[df_filtered['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum())
                 vlr_perdido = int(df_filtered[df_filtered['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum())
                 vlr_fechado = int(df_filtered[df_filtered['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum())
                 qtd_interacoes = len(df_filtered)
                 
-                # 3. KPI NA MESA
+                # KPI NA MESA (Deduplicado por ID CRM e ID Pedido Protheus)
                 orcamentos_periodo = df_filtered[df_filtered['Tipo'] == 'Orçamento Enviado']
+                
+                # Mapa para pegar só o último valor de cada pedido
+                mapa_ultimos_valores = {} # { 'PEDIDO_123': 1200, 'HASH_ABC': 1000 }
+                
                 for _, row in orcamentos_periodo.iterrows():
                     pid = extrair_id(row['Resumo'])
-                    if not pid or (pid and pid not in ids_resolvidos):
-                        vlr_pipeline += row['Valor_Proposta']
+                    pedido_protheus = extrair_pedido_protheus(row['Resumo'])
+                    
+                    chave_unica = pedido_protheus if pedido_protheus else pid
+                    
+                    if chave_unica:
+                        # Checa se já foi baixado
+                        esta_baixado = False
+                        if pid and pid in ids_resolvidos: esta_baixado = True
+                        if pedido_protheus and pedido_protheus in pedidos_baixados_protheus: esta_baixado = True
+                        
+                        if not esta_baixado:
+                            # Sobrescreve com o valor mais recente (assumindo ordem do df ou iterando)
+                            # Como o df não está garantido ordem, ideal seria ordenar antes.
+                            # Mas como estamos iterando, vamos assumir que queremos somar.
+                            # MELHOR: Usar o dicionário para guardar o último valor encontrado.
+                            mapa_ultimos_valores[chave_unica] = row['Valor_Proposta']
+
+                vlr_pipeline = sum(mapa_ultimos_valores.values())
                 
                 if tipos_sel: df_tabela = df_filtered[df_filtered['Tipo'].isin(tipos_sel)]
                 else: df_tabela = df_filtered
@@ -553,11 +617,8 @@ try:
                             v_contato = cli.get('Nome_Contato', '-') if 'Nome_Contato' in cli else cli.get('Contato', '-')
                             col_d1.write(f"**👤 Contato:** {v_contato}")
                             col_d1.write(f"**📞 Tel:** {cli.get('Telefone_Contato1', '-')}")
-                            
-                            # MOSTRAR CARTEIRA (DONO) AQUI
                             v_dono = cli.get('Ultimo_Vendedor', '-')
                             col_d2.write(f"**👔 Carteira:** {v_dono}")
-                            
                             col_d2.write(f"**💰 Total:** {formatar_moeda_visual(cli.get('Total_Compras', 0))}")
                             col_d2.write(f"**📅 Compra:** {formatar_data_br(cli.get('Data_Ultima_Compra', '-'))}")
                             st.divider()
@@ -579,13 +640,18 @@ try:
                                 if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                                     props = df_interacoes[(df_interacoes['CNPJ_Cliente'] == str(cid)) & (df_interacoes['Tipo'] == 'Orçamento Enviado')].copy()
                                     
-                                    # FILTRO: Mostra apenas o que não foi resolvido
                                     props_ativas = []
                                     if not props.empty:
-                                        props = props.iloc[::-1] # Ordena
+                                        props = props.iloc[::-1]
                                         for _, row in props.iterrows():
                                             pid = extrair_id(row['Resumo'])
-                                            if not pid or (pid and pid not in ids_resolvidos):
+                                            ped_proth = extrair_pedido_protheus(row['Resumo'])
+                                            
+                                            esta_resolvido = False
+                                            if pid and pid in ids_resolvidos: esta_resolvido = True
+                                            if ped_proth and ped_proth in pedidos_baixados_protheus: esta_resolvido = True
+                                            
+                                            if not esta_resolvido:
                                                 props_ativas.append(row)
                                     
                                     if props_ativas:
@@ -607,14 +673,11 @@ try:
                             with tab_nova:
                                 tipo = st.selectbox("Ação:", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
                                 if tipo == "Orçamento Enviado":
-                                    # Limpeza para evitar erro float vs str
                                     if "val_temp" in st.session_state and isinstance(st.session_state["val_temp"], str):
                                         st.session_state["val_temp"] = 0
-                                    
                                     st.number_input("Valor (R$):", min_value=0, step=1, key="val_temp", help="Apenas números inteiros.")
                                 else:
                                     if "val_temp" not in st.session_state: st.session_state["val_temp"] = 0
-                                    
                                 st.text_area("Obs:", key="obs_temp")
                                 st.button("✅ Salvar Nova Interação", type="primary", on_click=processar_salvamento_vendedor, args=(cid, usuario_logado, tipo))
 
