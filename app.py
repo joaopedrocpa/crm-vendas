@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 16.0", layout="wide")
+st.set_page_config(page_title="CRM Master 17.0", layout="wide")
 
 # --- CSS (VISUAL DARK) ---
 st.markdown("""
@@ -197,6 +197,82 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         st.error(f"Erro Lead: {e}")
         return False
 
+# --- IMPORTAÇÃO PROTHEUS ---
+def processar_arquivo_protheus(uploaded_file, df_existente):
+    try:
+        df_import = pd.read_excel(uploaded_file)
+        
+        # Validação básica de colunas
+        cols_necessarias = ['DATA', 'CNPJ', 'VENDEDOR', 'VALOR', 'PEDIDO', 'STATUS']
+        if not all(col in df_import.columns for col in cols_necessarias):
+            return False, f"Arquivo inválido! Colunas necessárias: {cols_necessarias}"
+        
+        novas_linhas = []
+        contador = 0
+        pulos = 0
+        
+        # Prepara lista de pedidos já existentes para não duplicar
+        # Procura por "[PROTHEUS] Pedido: 123" no resumo
+        pedidos_existentes = set()
+        if not df_existente.empty:
+            for resumo in df_existente['Resumo'].astype(str):
+                match = re.search(r'\[PROTHEUS\] Pedido: (\w+)', resumo)
+                if match:
+                    pedidos_existentes.add(match.group(1))
+
+        spreadsheet = conectar_google_sheets()
+        sheet = spreadsheet.worksheet("Interacoes")
+        
+        for index, row in df_import.iterrows():
+            pedido_id = str(row['PEDIDO']).strip()
+            
+            # Checa duplicidade
+            if pedido_id in pedidos_existentes:
+                pulos += 1
+                continue
+            
+            # Tradução de Dados
+            cnpj = ''.join(filter(str.isdigit, str(row['CNPJ']))) # Limpa CNPJ
+            
+            # Trata Data
+            try: data_obj = pd.to_datetime(row['DATA']).strftime('%d/%m/%Y')
+            except: data_obj = datetime.now().strftime('%d/%m/%Y')
+            
+            # Trata Valor
+            valor_limpo = limpar_valor_inteiro(row['VALOR'])
+            
+            # Trata Status -> Tipo CRM
+            status_orig = str(row['STATUS']).upper().strip()
+            tipo_crm = "Orçamento Enviado" # Default
+            if "FECHADO" in status_orig or "FATURADO" in status_orig:
+                tipo_crm = "Venda Fechada"
+            elif "CANCELADO" in status_orig:
+                tipo_crm = "Venda Perdida"
+            
+            # Gera ID CRM apenas se for Orçamento
+            crm_id_tag = f"#{gerar_id_proposta()} " if tipo_crm == "Orçamento Enviado" else ""
+            resumo_final = f"{crm_id_tag}[PROTHEUS] Pedido: {pedido_id} | Status: {status_orig}"
+            
+            novas_linhas.append([
+                cnpj, 
+                data_obj, 
+                tipo_crm, 
+                resumo_final, 
+                str(row['VENDEDOR']).upper().strip(), 
+                valor_limpo
+            ])
+            contador += 1
+            
+        if novas_linhas:
+            sheet.append_rows(novas_linhas)
+            st.cache_data.clear()
+            return True, f"Sucesso! {contador} pedidos importados. {pulos} duplicados ignorados."
+        else:
+            return True, f"Nenhum pedido novo encontrado. {pulos} duplicados."
+            
+    except Exception as e:
+        return False, f"Erro no processamento: {e}"
+
 # --- CALLBACKS ---
 def processar_salvamento_lead(usuario_logado):
     nome = st.session_state["novo_nome"]
@@ -236,7 +312,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 16.0")
+    st.sidebar.title("🚀 CRM Master 17.0")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -316,6 +392,18 @@ try:
             return status_calc
         
         df['Status'] = df.apply(calcular_status, axis=1)
+
+        # --- ÁREA DE IMPORTAÇÃO (SIDEBAR) ---
+        if tipo_usuario == "GESTOR":
+            st.sidebar.markdown("---")
+            with st.sidebar.expander("📥 Importar Protheus (Excel)"):
+                st.info("Colunas: DATA, CNPJ, VENDEDOR, VALOR, PEDIDO, STATUS")
+                uploaded_file = st.file_uploader("Selecione o arquivo .xlsx", type=["xlsx"])
+                if uploaded_file is not None:
+                    if st.button("Processar Arquivo"):
+                        sucesso, msg = processar_arquivo_protheus(uploaded_file, df_interacoes)
+                        if sucesso: st.success(msg)
+                        else: st.error(msg)
 
         # CADASTRO
         if tipo_usuario == "VENDEDOR" or "TODOS" in carteiras_permitidas:
