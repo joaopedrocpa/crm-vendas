@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 13.0", layout="wide")
+st.set_page_config(page_title="CRM Master 14.0", layout="wide")
 
 # --- CSS (VISUAL DARK) ---
 st.markdown("""
@@ -163,7 +163,7 @@ def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_inteiro
         valor_save = int(valor_inteiro)
         
         id_prop = ""
-        # Se for orçamento, GERA ID. Se for outra coisa, não gera (mas pode ter ID no resumo vindo de outro lugar)
+        # Gera ID se for Orçamento
         if tipo == "Orçamento Enviado":
             id_prop = f"#{gerar_id_proposta()}"
             resumo_final = f"{id_prop} {resumo}"
@@ -212,12 +212,10 @@ def processar_salvamento_lead(usuario_logado):
 
 def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
     obs = st.session_state["obs_temp"]
-    # GARANTIA DE TIPO: Se vier string suja, converte ou zera
+    # Limpeza de segurança (caso venha string do cache anterior)
     val_raw = st.session_state.get("val_temp", 0)
-    try:
-        val = int(val_raw)
-    except:
-        val = 0
+    try: val = int(val_raw)
+    except: val = 0
 
     if salvar_interacao_nuvem(cid, datetime.now(), tipo_selecionado, obs, usuario_logado, val):
         st.success("Salvo!")
@@ -227,10 +225,8 @@ def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
 def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
     valor = proposta_row['Valor_Proposta']
     resumo_orig = proposta_row['Resumo']
-    # Extrai o ID Original para referenciar
     id_ref = extrair_id(resumo_orig)
     obs_id = id_ref if id_ref else "(S/ ID)"
-    
     obs = f"Ref. Proposta {obs_id}. Detalhes: {resumo_orig}"
     
     if salvar_interacao_nuvem(cid, datetime.now(), status_novo, obs, usuario_logado, valor):
@@ -240,7 +236,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 13.0")
+    st.sidebar.title("🚀 CRM Master 14.0")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -276,58 +272,61 @@ try:
         if 'Data_Ultima_Compra' in df.columns: df['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df['Data_Ultima_Compra']).dt.days
         else: df['Dias_Sem_Comprar'] = 0
 
-        # LÓGICA DE PROPOSTAS ATIVAS (CORREÇÃO DE MÚLTIPLAS VENDAS)
-        # 1. Identificar quais IDs já foram fechados/perdidos
+        # --- LÓGICA DE PRECEDÊNCIA DE STATUS (TRAVA DE PIPELINE) ---
         ids_resolvidos = []
         if not df_interacoes.empty and 'Resumo' in df_interacoes.columns:
-            # Pega linhas que são fechamento ou perda
             resolvidos = df_interacoes[df_interacoes['Tipo'].isin(['Venda Fechada', 'Venda Perdida'])]
-            # Extrai os IDs citados nessas linhas
             for texto in resolvidos['Resumo'].astype(str):
                 id_enc = extrair_id(texto)
                 if id_enc: ids_resolvidos.append(id_enc)
 
-        # Dicionário de Valor em Mesa (Soma das propostas que NÃO foram resolvidas)
-        clientes_pipeline = {} # {CNPJ: Valor_Total_Aberto}
+        clientes_pipeline = {} 
 
         def calcular_status(linha):
             cnpj = linha['ID_Cliente_CNPJ_CPF']
             cnpj_str = str(cnpj)
-            status_final = '🟢 ATIVO'
-            if pd.isna(linha['Dias_Sem_Comprar']): status_final = '🆕 NOVO S/ INTERAÇÃO'
-            elif linha['Dias_Sem_Comprar'] >= 60: status_final = '🔴 RECUPERAR'
+            
+            # Default
+            status_calc = '🟢 ATIVO'
+            if pd.isna(linha['Dias_Sem_Comprar']): status_calc = '🆕 NOVO S/ INTERAÇÃO'
+            elif linha['Dias_Sem_Comprar'] >= 60: status_calc = '🔴 RECUPERAR'
 
             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                 filtro = df_interacoes[df_interacoes['CNPJ_Cliente'] == cnpj_str]
                 if not filtro.empty:
-                    # Ordena cronologicamente
-                    filtro = filtro.sort_values('Data_Obj', ascending=True)
-                    
-                    # 1. Calcula Pipeline (Soma Orçamentos não resolvidos)
+                    # 1. VERIFICA SE TEM ALGUMA PROPOSTA ABERTA (TRAVA DE SEGURANÇA)
+                    tem_proposta_aberta = False
                     soma_aberta = 0
+                    
                     orcamentos = filtro[filtro['Tipo'] == 'Orçamento Enviado']
                     for _, row in orcamentos.iterrows():
                         meu_id = extrair_id(row['Resumo'])
-                        # Se não tem ID (antigo) ou ID não está na lista de resolvidos, SOMA
+                        # Se não tem ID (antigo) ou ID não está na lista de resolvidos, ENTÃO ESTÁ ABERTO
                         if not meu_id or (meu_id and meu_id not in ids_resolvidos):
+                            tem_proposta_aberta = True
                             soma_aberta += row['Valor_Proposta']
                     
                     if soma_aberta > 0:
                         clientes_pipeline[cnpj_str] = soma_aberta
 
-                    # 2. Define Status Baseado na ÚLTIMA AÇÃO
-                    ultima = filtro.iloc[-1]
-                    try:
-                        if pd.notna(ultima['Data_Obj']):
-                            dias_acao = (hoje - ultima['Data_Obj']).days
-                            if ultima['Tipo'] == 'Orçamento Enviado':
-                                status_final = '⚠️ FOLLOW-UP' if dias_acao >= 5 else '⏳ NEGOCIAÇÃO'
-                            elif ultima['Tipo'] == 'Venda Fechada': status_final = '⭐ VENDA RECENTE'
-                            elif ultima['Tipo'] == 'Venda Perdida': status_final = '👎 VENDA PERDIDA'
-                            elif ultima['Tipo'] == 'Ligação Realizada': status_final = '📞 CONTATADO RECENTEMENTE'
-                            elif ultima['Tipo'] == 'WhatsApp Enviado': status_final = '💬 WHATSAPP INICIADO'
-                    except: pass
-            return status_final
+                    # LÓGICA HIERÁRQUICA
+                    if tem_proposta_aberta:
+                        # Se tem qualquer proposta aberta, status é OBRIGATORIAMENTE NEGOCIAÇÃO
+                        return '⏳ NEGOCIAÇÃO'
+                    else:
+                        # Se não tem nada aberto, vale a ÚLTIMA AÇÃO
+                        filtro_sorted = filtro.sort_values('Data_Obj', ascending=True)
+                        ultima = filtro_sorted.iloc[-1]
+                        try:
+                            if pd.notna(ultima['Data_Obj']):
+                                if ultima['Tipo'] == 'Venda Fechada': return '⭐ VENDA RECENTE'
+                                elif ultima['Tipo'] == 'Venda Perdida': return '👎 VENDA PERDIDA'
+                                elif ultima['Tipo'] == 'Ligação Realizada': return '📞 CONTATADO RECENTEMENTE'
+                                elif ultima['Tipo'] == 'WhatsApp Enviado': return '💬 WHATSAPP INICIADO'
+                                elif ultima['Tipo'] == 'Orçamento Enviado': return '⏳ NEGOCIAÇÃO' # Fallback
+                        except: pass
+            
+            return status_calc
         
         df['Status'] = df.apply(calcular_status, axis=1)
 
@@ -335,7 +334,7 @@ try:
         if tipo_usuario == "VENDEDOR" or "TODOS" in carteiras_permitidas:
             st.sidebar.markdown("---")
             with st.sidebar.expander("➕ Cadastrar Novo Lead"):
-                # LIMPEZA DE STATE PARA EVITAR ERRO DE TIPO
+                # Limpeza de segurança
                 if "novo_val" in st.session_state and isinstance(st.session_state["novo_val"], str):
                     st.session_state["novo_val"] = 0
                 
@@ -501,10 +500,10 @@ try:
                                 if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                                     props = df_interacoes[(df_interacoes['CNPJ_Cliente'] == str(cid)) & (df_interacoes['Tipo'] == 'Orçamento Enviado')].copy()
                                     
-                                    # LÓGICA DE FILTRO: Só mostra se o ID não foi fechado ainda
+                                    # FILTRO: Mostra apenas o que não foi resolvido
                                     props_ativas = []
                                     if not props.empty:
-                                        props = props.iloc[::-1] # Mais recente primeiro
+                                        props = props.iloc[::-1] # Ordena
                                         for _, row in props.iterrows():
                                             pid = extrair_id(row['Resumo'])
                                             if not pid or (pid and pid not in ids_resolvidos):
@@ -520,7 +519,6 @@ try:
                                                 c_p1.markdown(f"**{dt_p}** | {val_p}")
                                                 c_p1.caption(f"{resumo_p}")
                                                 
-                                                # Chaves unicas para os botoes
                                                 if c_p2.button("✅ FECHAR", key=f"btn_win_{idx}_{row['Resumo']}"):
                                                     fechar_proposta_automatica(cid, usuario_logado, row, "Venda Fechada")
                                                 if c_p3.button("❌ PERDER", key=f"btn_loss_{idx}_{row['Resumo']}"):
@@ -530,7 +528,7 @@ try:
                             with tab_nova:
                                 tipo = st.selectbox("Ação:", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
                                 if tipo == "Orçamento Enviado":
-                                    # GARANTIA: Se state estiver sujo com string, limpa antes
+                                    # Limpeza para evitar erro float vs str
                                     if "val_temp" in st.session_state and isinstance(st.session_state["val_temp"], str):
                                         st.session_state["val_temp"] = 0
                                     
