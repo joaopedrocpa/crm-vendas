@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 14.0", layout="wide")
+st.set_page_config(page_title="CRM Master 15.0", layout="wide")
 
 # --- CSS (VISUAL DARK) ---
 st.markdown("""
@@ -212,7 +212,7 @@ def processar_salvamento_lead(usuario_logado):
 
 def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
     obs = st.session_state["obs_temp"]
-    # Limpeza de segurança (caso venha string do cache anterior)
+    # Limpeza de segurança
     val_raw = st.session_state.get("val_temp", 0)
     try: val = int(val_raw)
     except: val = 0
@@ -236,7 +236,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 14.0")
+    st.sidebar.title("🚀 CRM Master 15.0")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -272,7 +272,7 @@ try:
         if 'Data_Ultima_Compra' in df.columns: df['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df['Data_Ultima_Compra']).dt.days
         else: df['Dias_Sem_Comprar'] = 0
 
-        # --- LÓGICA DE PRECEDÊNCIA DE STATUS (TRAVA DE PIPELINE) ---
+        # --- PREPARA LISTA DE IDs JÁ RESOLVIDOS (GLOBAL) ---
         ids_resolvidos = []
         if not df_interacoes.empty and 'Resumo' in df_interacoes.columns:
             resolvidos = df_interacoes[df_interacoes['Tipo'].isin(['Venda Fechada', 'Venda Perdida'])]
@@ -280,13 +280,9 @@ try:
                 id_enc = extrair_id(texto)
                 if id_enc: ids_resolvidos.append(id_enc)
 
-        clientes_pipeline = {} 
-
         def calcular_status(linha):
             cnpj = linha['ID_Cliente_CNPJ_CPF']
             cnpj_str = str(cnpj)
-            
-            # Default
             status_calc = '🟢 ATIVO'
             if pd.isna(linha['Dias_Sem_Comprar']): status_calc = '🆕 NOVO S/ INTERAÇÃO'
             elif linha['Dias_Sem_Comprar'] >= 60: status_calc = '🔴 RECUPERAR'
@@ -294,27 +290,19 @@ try:
             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                 filtro = df_interacoes[df_interacoes['CNPJ_Cliente'] == cnpj_str]
                 if not filtro.empty:
-                    # 1. VERIFICA SE TEM ALGUMA PROPOSTA ABERTA (TRAVA DE SEGURANÇA)
+                    # VERIFICA SE TEM PROPOSTA ABERTA (TRAVA DE STATUS)
                     tem_proposta_aberta = False
-                    soma_aberta = 0
-                    
                     orcamentos = filtro[filtro['Tipo'] == 'Orçamento Enviado']
                     for _, row in orcamentos.iterrows():
                         meu_id = extrair_id(row['Resumo'])
-                        # Se não tem ID (antigo) ou ID não está na lista de resolvidos, ENTÃO ESTÁ ABERTO
+                        # Se não tem ID ou ID não foi resolvido -> Está Aberta
                         if not meu_id or (meu_id and meu_id not in ids_resolvidos):
                             tem_proposta_aberta = True
-                            soma_aberta += row['Valor_Proposta']
                     
-                    if soma_aberta > 0:
-                        clientes_pipeline[cnpj_str] = soma_aberta
-
-                    # LÓGICA HIERÁRQUICA
                     if tem_proposta_aberta:
-                        # Se tem qualquer proposta aberta, status é OBRIGATORIAMENTE NEGOCIAÇÃO
                         return '⏳ NEGOCIAÇÃO'
                     else:
-                        # Se não tem nada aberto, vale a ÚLTIMA AÇÃO
+                        # Se não tem nada aberto, vale a última ação cronológica
                         filtro_sorted = filtro.sort_values('Data_Obj', ascending=True)
                         ultima = filtro_sorted.iloc[-1]
                         try:
@@ -323,7 +311,7 @@ try:
                                 elif ultima['Tipo'] == 'Venda Perdida': return '👎 VENDA PERDIDA'
                                 elif ultima['Tipo'] == 'Ligação Realizada': return '📞 CONTATADO RECENTEMENTE'
                                 elif ultima['Tipo'] == 'WhatsApp Enviado': return '💬 WHATSAPP INICIADO'
-                                elif ultima['Tipo'] == 'Orçamento Enviado': return '⏳ NEGOCIAÇÃO' # Fallback
+                                elif ultima['Tipo'] == 'Orçamento Enviado': return '⏳ NEGOCIAÇÃO'
                         except: pass
             
             return status_calc
@@ -360,7 +348,7 @@ try:
                 st.text_area("Resumo:", key="novo_resumo")
                 st.button("💾 SALVAR LEAD", type="primary", on_click=processar_salvamento_lead, args=(usuario_logado,))
 
-        # FILTROS
+        # FILTROS GLOBAIS
         if "TODOS" in carteiras_permitidas:
             meus_clientes = df
             minhas_interacoes = df_interacoes
@@ -386,19 +374,30 @@ try:
             vlr_orcado = 0
             vlr_fechado = 0
             vlr_perdido = 0
-            vlr_pipeline = 0
+            vlr_pipeline = 0 # Na Mesa
             qtd_interacoes = 0
             
             if not minhas_interacoes.empty and 'Data_Obj' in minhas_interacoes.columns:
+                # 1. Filtro de Data e Vendedor
                 mask_data = ((minhas_interacoes['Data_Obj'] >= d_ini) & (minhas_interacoes['Data_Obj'] <= d_fim))
                 if sel_vendedores: mask_data = mask_data & (minhas_interacoes['Vendedor'].isin(sel_vendedores))
                 
                 df_filtered = minhas_interacoes[mask_data].copy()
                 
+                # 2. KPIs Simples (Soma direta)
                 vlr_orcado = int(df_filtered[df_filtered['Tipo'] == 'Orçamento Enviado']['Valor_Proposta'].sum())
                 vlr_perdido = int(df_filtered[df_filtered['Tipo'] == 'Venda Perdida']['Valor_Proposta'].sum())
                 vlr_fechado = int(df_filtered[df_filtered['Tipo'] == 'Venda Fechada']['Valor_Proposta'].sum())
                 qtd_interacoes = len(df_filtered)
+                
+                # 3. KPI NA MESA (Calculado Explicito)
+                # Filtra Orçamentos do período/vendedor selecionado que NÃO foram baixados
+                orcamentos_periodo = df_filtered[df_filtered['Tipo'] == 'Orçamento Enviado']
+                for _, row in orcamentos_periodo.iterrows():
+                    pid = extrair_id(row['Resumo'])
+                    # Se não tem ID (antigo) ou ID não está na lista global de resolvidos -> SOMA
+                    if not pid or (pid and pid not in ids_resolvidos):
+                        vlr_pipeline += row['Valor_Proposta']
                 
                 if tipos_sel: df_tabela = df_filtered[df_filtered['Tipo'].isin(tipos_sel)]
                 else: df_tabela = df_filtered
@@ -406,19 +405,9 @@ try:
                 df_filtered = pd.DataFrame()
                 df_tabela = pd.DataFrame()
 
-            # Pipeline
-            if sel_vendedores:
-                clientes_alvo = meus_clientes[meus_clientes['Ultimo_Vendedor'].isin(sel_vendedores)]['ID_Cliente_CNPJ_CPF'].astype(str).tolist()
-            else:
-                clientes_alvo = meus_clientes['ID_Cliente_CNPJ_CPF'].astype(str).tolist()
-            
-            for cnpj_key, val_negoc in clientes_pipeline.items():
-                if cnpj_key in clientes_alvo:
-                    vlr_pipeline += val_negoc
-
             k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("💰 Total Orçado", formatar_moeda_visual(vlr_orcado))
-            k2.metric("🔮 Na Mesa", formatar_moeda_visual(vlr_pipeline))
+            k1.metric("💰 Orçado", formatar_moeda_visual(vlr_orcado))
+            k2.metric("🔮 Na Mesa", formatar_moeda_visual(vlr_pipeline), help="Orçamentos enviados neste período que ainda estão abertos.")
             k3.metric("✅ Fechado", formatar_moeda_visual(vlr_fechado))
             k4.metric("👎 Perdido", formatar_moeda_visual(vlr_perdido))
             k5.metric("📞 Interações", f"{qtd_interacoes}")
