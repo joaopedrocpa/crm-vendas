@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 12.0", layout="wide")
+st.set_page_config(page_title="CRM Master 13.0", layout="wide")
 
 # --- CSS (VISUAL DARK) ---
 st.markdown("""
@@ -33,41 +33,29 @@ st.markdown("""
 def gerar_id_proposta():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
+def extrair_id(texto):
+    """Procura por padrão #A1B2 no texto"""
+    if pd.isna(texto): return None
+    match = re.search(r'(#[A-Z0-9]{4})', str(texto))
+    return match.group(1) if match else None
+
 def limpar_valor_inteiro(valor):
-    """
-    FORÇA BRUTA PARA INTEIRO.
-    Remove centavos, remove pontos, remove vírgulas.
-    Ex: '1.500,50' vira 1500
-    Ex: 1500.99 vira 1500
-    """
+    """FORÇA BRUTA PARA INTEIRO."""
     if pd.isna(valor) or str(valor).strip() == '': return 0
-    
-    # Se já for número (int ou float), converte pra int direto
-    if isinstance(valor, (int, float)):
-        return int(valor)
+    if isinstance(valor, (int, float)): return int(valor)
     
     s = str(valor).upper().replace('R$', '').strip()
-    
-    # Se tiver vírgula, a gente assume que é separador decimal e joga fora o que tem depois
-    if ',' in s:
-        s = s.split(',')[0] # Pega só a parte inteira antes da vírgula
-    
-    # Remove pontos de milhar
-    s = s.replace('.', '')
-    
-    # Remove qualquer lixo que sobrou
-    s = re.sub(r'[^\d]', '', s)
+    if ',' in s: s = s.split(',')[0] # Remove decimal
+    s = s.replace('.', '') # Remove milhar
+    s = re.sub(r'[^\d]', '', s) # Remove lixo
     
     if not s: return 0
-    
     return int(s)
 
 def formatar_moeda_visual(valor):
-    """Exibe Inteiro como Moeda (R$ 1.500)"""
     if pd.isna(valor): return "R$ 0"
     try:
         val = int(valor)
-        # Formata com ponto de milhar padrão (1.500)
         return f"R$ {val:,.0f}".replace(',', '.')
     except: return "R$ 0"
 
@@ -106,20 +94,20 @@ def carregar_dados_completos():
     spreadsheet = conectar_google_sheets()
     if spreadsheet is None: return None, None, None
     try:
-        # 1. Config
+        # Config
         try:
             sheet_config = spreadsheet.worksheet("Config_Equipe")
             df_config = pd.DataFrame(sheet_config.get_all_records())
             for col in df_config.columns: df_config[col] = df_config[col].astype(str)
         except: return None, None, None
 
-        # 2. Clientes
+        # Clientes
         try:
             sheet_clientes = spreadsheet.worksheet("Clientes")
             df_protheus = pd.DataFrame(sheet_clientes.get_all_records())
         except: return None, None, None
         
-        # 3. Leads
+        # Leads
         try:
             sheet_leads = spreadsheet.worksheet("Novos_Leads")
             dados_leads = sheet_leads.get_all_records()
@@ -143,7 +131,7 @@ def carregar_dados_completos():
             if 'Data_Ultima_Compra' in df_clientes.columns:
                 df_clientes['Data_Ultima_Compra'] = pd.to_datetime(df_clientes['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
         
-        # 4. Interações
+        # Interações
         try:
             sheet_interacoes = spreadsheet.worksheet("Interacoes")
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
@@ -172,11 +160,10 @@ def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_inteiro
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
         data_str = data_obj.strftime('%d/%m/%Y')
-        
-        # GARANTIA: Envia Inteiro Puro
         valor_save = int(valor_inteiro)
         
         id_prop = ""
+        # Se for orçamento, GERA ID. Se for outra coisa, não gera (mas pode ter ID no resumo vindo de outro lugar)
         if tipo == "Orçamento Enviado":
             id_prop = f"#{gerar_id_proposta()}"
             resumo_final = f"{id_prop} {resumo}"
@@ -198,7 +185,6 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         sheet_leads.append_row(nova_linha)
         sheet_interacoes = spreadsheet.worksheet("Interacoes")
         data_str = datetime.now().strftime('%d/%m/%Y')
-        
         valor_save = int(valor_inteiro)
         
         id_prop = f"#{gerar_id_proposta()}" if primeira_acao == "Orçamento Enviado" else ""
@@ -226,18 +212,26 @@ def processar_salvamento_lead(usuario_logado):
 
 def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
     obs = st.session_state["obs_temp"]
-    val = st.session_state["val_temp"]
+    # GARANTIA DE TIPO: Se vier string suja, converte ou zera
+    val_raw = st.session_state.get("val_temp", 0)
+    try:
+        val = int(val_raw)
+    except:
+        val = 0
+
     if salvar_interacao_nuvem(cid, datetime.now(), tipo_selecionado, obs, usuario_logado, val):
         st.success("Salvo!")
         st.session_state["obs_temp"] = ""
         st.session_state["val_temp"] = 0
 
 def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
-    valor = proposta_row['Valor_Proposta'] # Já vem como Inteiro do DataFrame limpo
+    valor = proposta_row['Valor_Proposta']
     resumo_orig = proposta_row['Resumo']
-    match = re.search(r'(#[A-Z0-9]{4})', str(resumo_orig))
-    id_ref = match.group(1) if match else "(S/ ID)"
-    obs = f"Fechamento da Proposta {id_ref}. Detalhes: {resumo_orig}"
+    # Extrai o ID Original para referenciar
+    id_ref = extrair_id(resumo_orig)
+    obs_id = id_ref if id_ref else "(S/ ID)"
+    
+    obs = f"Ref. Proposta {obs_id}. Detalhes: {resumo_orig}"
     
     if salvar_interacao_nuvem(cid, datetime.now(), status_novo, obs, usuario_logado, valor):
         st.success(f"Proposta {status_novo}!")
@@ -246,7 +240,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 12.0")
+    st.sidebar.title("🚀 CRM Master 13.0")
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
@@ -282,7 +276,19 @@ try:
         if 'Data_Ultima_Compra' in df.columns: df['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df['Data_Ultima_Compra']).dt.days
         else: df['Dias_Sem_Comprar'] = 0
 
-        clientes_em_negociacao_valores = {}
+        # LÓGICA DE PROPOSTAS ATIVAS (CORREÇÃO DE MÚLTIPLAS VENDAS)
+        # 1. Identificar quais IDs já foram fechados/perdidos
+        ids_resolvidos = []
+        if not df_interacoes.empty and 'Resumo' in df_interacoes.columns:
+            # Pega linhas que são fechamento ou perda
+            resolvidos = df_interacoes[df_interacoes['Tipo'].isin(['Venda Fechada', 'Venda Perdida'])]
+            # Extrai os IDs citados nessas linhas
+            for texto in resolvidos['Resumo'].astype(str):
+                id_enc = extrair_id(texto)
+                if id_enc: ids_resolvidos.append(id_enc)
+
+        # Dicionário de Valor em Mesa (Soma das propostas que NÃO foram resolvidas)
+        clientes_pipeline = {} # {CNPJ: Valor_Total_Aberto}
 
         def calcular_status(linha):
             cnpj = linha['ID_Cliente_CNPJ_CPF']
@@ -294,13 +300,28 @@ try:
             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                 filtro = df_interacoes[df_interacoes['CNPJ_Cliente'] == cnpj_str]
                 if not filtro.empty:
+                    # Ordena cronologicamente
+                    filtro = filtro.sort_values('Data_Obj', ascending=True)
+                    
+                    # 1. Calcula Pipeline (Soma Orçamentos não resolvidos)
+                    soma_aberta = 0
+                    orcamentos = filtro[filtro['Tipo'] == 'Orçamento Enviado']
+                    for _, row in orcamentos.iterrows():
+                        meu_id = extrair_id(row['Resumo'])
+                        # Se não tem ID (antigo) ou ID não está na lista de resolvidos, SOMA
+                        if not meu_id or (meu_id and meu_id not in ids_resolvidos):
+                            soma_aberta += row['Valor_Proposta']
+                    
+                    if soma_aberta > 0:
+                        clientes_pipeline[cnpj_str] = soma_aberta
+
+                    # 2. Define Status Baseado na ÚLTIMA AÇÃO
                     ultima = filtro.iloc[-1]
                     try:
                         if pd.notna(ultima['Data_Obj']):
                             dias_acao = (hoje - ultima['Data_Obj']).days
                             if ultima['Tipo'] == 'Orçamento Enviado':
                                 status_final = '⚠️ FOLLOW-UP' if dias_acao >= 5 else '⏳ NEGOCIAÇÃO'
-                                clientes_em_negociacao_valores[cnpj_str] = ultima['Valor_Proposta']
                             elif ultima['Tipo'] == 'Venda Fechada': status_final = '⭐ VENDA RECENTE'
                             elif ultima['Tipo'] == 'Venda Perdida': status_final = '👎 VENDA PERDIDA'
                             elif ultima['Tipo'] == 'Ligação Realizada': status_final = '📞 CONTATADO RECENTEMENTE'
@@ -314,9 +335,12 @@ try:
         if tipo_usuario == "VENDEDOR" or "TODOS" in carteiras_permitidas:
             st.sidebar.markdown("---")
             with st.sidebar.expander("➕ Cadastrar Novo Lead"):
+                # LIMPEZA DE STATE PARA EVITAR ERRO DE TIPO
+                if "novo_val" in st.session_state and isinstance(st.session_state["novo_val"], str):
+                    st.session_state["novo_val"] = 0
+                
                 for k in ["novo_nome", "novo_doc", "novo_contato", "novo_tel", "novo_resumo"]:
                     if k not in st.session_state: st.session_state[k] = ""
-                # VALOR INTEIRO (0)
                 if "novo_val" not in st.session_state: st.session_state["novo_val"] = 0
                 if "novo_origem" not in st.session_state: st.session_state["novo_origem"] = "SELECIONE..."
                 if "novo_acao" not in st.session_state: st.session_state["novo_acao"] = "SELECIONE..."
@@ -332,8 +356,7 @@ try:
                 c4.selectbox("Ação:", ["SELECIONE...", "Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"], key="novo_acao")
                 
                 if st.session_state["novo_acao"] == "Orçamento Enviado":
-                    # NUMBER INPUT COM STEP 1 (INTEIRO)
-                    st.number_input("Valor (R$ - Sem Centavos):", min_value=0, step=1, key="novo_val", help="Digite apenas o valor inteiro.")
+                    st.number_input("Valor (R$ - Inteiro):", min_value=0, step=1, key="novo_val", help="Apenas números inteiros.")
 
                 st.text_area("Resumo:", key="novo_resumo")
                 st.button("💾 SALVAR LEAD", type="primary", on_click=processar_salvamento_lead, args=(usuario_logado,))
@@ -390,12 +413,12 @@ try:
             else:
                 clientes_alvo = meus_clientes['ID_Cliente_CNPJ_CPF'].astype(str).tolist()
             
-            for cnpj_key, val_negoc in clientes_em_negociacao_valores.items():
+            for cnpj_key, val_negoc in clientes_pipeline.items():
                 if cnpj_key in clientes_alvo:
                     vlr_pipeline += val_negoc
 
             k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("💰 Orçado", formatar_moeda_visual(vlr_orcado))
+            k1.metric("💰 Total Orçado", formatar_moeda_visual(vlr_orcado))
             k2.metric("🔮 Na Mesa", formatar_moeda_visual(vlr_pipeline))
             k3.metric("✅ Fechado", formatar_moeda_visual(vlr_fechado))
             k4.metric("👎 Perdido", formatar_moeda_visual(vlr_perdido))
@@ -477,9 +500,18 @@ try:
                             with tab_prop:
                                 if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                                     props = df_interacoes[(df_interacoes['CNPJ_Cliente'] == str(cid)) & (df_interacoes['Tipo'] == 'Orçamento Enviado')].copy()
+                                    
+                                    # LÓGICA DE FILTRO: Só mostra se o ID não foi fechado ainda
+                                    props_ativas = []
                                     if not props.empty:
-                                        props = props.iloc[::-1]
-                                        for index, row in props.iterrows():
+                                        props = props.iloc[::-1] # Mais recente primeiro
+                                        for _, row in props.iterrows():
+                                            pid = extrair_id(row['Resumo'])
+                                            if not pid or (pid and pid not in ids_resolvidos):
+                                                props_ativas.append(row)
+                                    
+                                    if props_ativas:
+                                        for idx, row in enumerate(props_ativas):
                                             with st.container(border=True):
                                                 c_p1, c_p2, c_p3 = st.columns([2, 1, 1])
                                                 dt_p = formatar_data_br(row['Data_Obj'])
@@ -487,16 +519,21 @@ try:
                                                 resumo_p = row['Resumo']
                                                 c_p1.markdown(f"**{dt_p}** | {val_p}")
                                                 c_p1.caption(f"{resumo_p}")
-                                                if c_p2.button("✅ FECHAR", key=f"btn_win_{index}"):
+                                                
+                                                # Chaves unicas para os botoes
+                                                if c_p2.button("✅ FECHAR", key=f"btn_win_{idx}_{row['Resumo']}"):
                                                     fechar_proposta_automatica(cid, usuario_logado, row, "Venda Fechada")
-                                                if c_p3.button("❌ PERDER", key=f"btn_loss_{index}"):
+                                                if c_p3.button("❌ PERDER", key=f"btn_loss_{idx}_{row['Resumo']}"):
                                                     fechar_proposta_automatica(cid, usuario_logado, row, "Venda Perdida")
-                                    else: st.info("Nenhum orçamento em aberto encontrado.")
+                                    else: st.info("Nenhuma proposta em aberto.")
 
                             with tab_nova:
                                 tipo = st.selectbox("Ação:", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
                                 if tipo == "Orçamento Enviado":
-                                    # NUMBER INPUT INTEIRO
+                                    # GARANTIA: Se state estiver sujo com string, limpa antes
+                                    if "val_temp" in st.session_state and isinstance(st.session_state["val_temp"], str):
+                                        st.session_state["val_temp"] = 0
+                                    
                                     st.number_input("Valor (R$):", min_value=0, step=1, key="val_temp", help="Apenas números inteiros.")
                                 else:
                                     if "val_temp" not in st.session_state: st.session_state["val_temp"] = 0
