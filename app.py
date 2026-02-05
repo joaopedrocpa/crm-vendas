@@ -4,15 +4,20 @@ from datetime import datetime, date, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
+import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 8.0", layout="wide")
+st.set_page_config(page_title="CRM Master 9.0", layout="wide")
 
-# --- MENSAGEM DE CARREGAMENTO ---
-placeholder = st.empty()
-placeholder.info("⏳ Carregando sistema... Conectando ao Banco de Dados.")
+# --- CSS PARA REMOVER MARGENS E MELHORAR VISUAL ---
+st.markdown("""
+<style>
+    [data-testid="stSidebar"] {min-width: 300px;}
+    .stMetric {background-color: #f0f2f6; padding: 10px; border-radius: 10px;}
+</style>
+""", unsafe_allow_html=True)
 
-# --- FUNÇÕES DE FORMATAÇÃO ---
+# --- FUNÇÕES DE FORMATAÇÃO E LIMPEZA (CORREÇÃO 10x) ---
 def formatar_moeda_visual(valor):
     if pd.isna(valor) or str(valor).strip() == '': return "R$ 0,00"
     try:
@@ -20,15 +25,30 @@ def formatar_moeda_visual(valor):
     except: return str(valor)
 
 def limpar_valor_monetario(valor):
+    """
+    Função Agressiva para corrigir erro de multiplicação por 10x.
+    Prioriza o padrão brasileiro (vírgula como decimal).
+    """
     if pd.isna(valor): return 0.0
-    s = str(valor).strip().replace('R$', '').strip()
+    s = str(valor).strip()
+    
+    # Se for número puro vindo do Excel (float ou int), retorna direto
+    if isinstance(valor, (int, float)):
+        return float(valor)
+
+    # Limpeza de texto
+    s = s.replace('R$', '').strip()
+    
+    # LÓGICA BLINDADA BRASILEIRA:
+    # 1. Removemos TODOS os pontos (separadores de milhar) -> 1.000,00 vira 1000,00
+    s = s.replace('.', '')
+    # 2. Trocamos a vírgula por ponto (decimal) -> 1000,00 vira 1000.00
+    s = s.replace(',', '.')
+    
     try:
         return float(s)
     except:
-        if '.' in s and ',' in s: s = s.replace('.', '').replace(',', '.')
-        elif ',' in s: s = s.replace(',', '.')
-        try: return float(s)
-        except: return 0.0
+        return 0.0
 
 def formatar_documento(valor):
     """Aplica máscara de CPF ou CNPJ"""
@@ -61,13 +81,24 @@ def conectar_google_sheets():
         st.error(f"⚠️ Erro de Conexão: {e}")
         return None
 
-# --- CARREGAMENTO ---
+# --- CARREGAMENTO DE DADOS ---
 @st.cache_data(ttl=60)
 def carregar_dados_completos():
     spreadsheet = conectar_google_sheets()
     if spreadsheet is None: return None, None, None
     try:
-        # 1. Clientes
+        # 1. Config (AGORA É O PRIMEIRO A CARREGAR PARA VALIDAR LOGIN)
+        try:
+            sheet_config = spreadsheet.worksheet("Config_Equipe")
+            df_config = pd.DataFrame(sheet_config.get_all_records())
+            # Força colunas como string para evitar erros
+            for col in df_config.columns:
+                df_config[col] = df_config[col].astype(str)
+        except:
+            st.error("Aba 'Config_Equipe' não encontrada ou fora do padrão!")
+            return None, None, None
+
+        # 2. Clientes
         try:
             sheet_clientes = spreadsheet.worksheet("Clientes")
             df_protheus = pd.DataFrame(sheet_clientes.get_all_records())
@@ -75,14 +106,14 @@ def carregar_dados_completos():
             st.error(f"Erro aba Clientes: {e}")
             return None, None, None
         
-        # 2. Leads
+        # 3. Leads
         try:
             sheet_leads = spreadsheet.worksheet("Novos_Leads")
             dados_leads = sheet_leads.get_all_records()
             df_leads = pd.DataFrame(dados_leads)
         except: df_leads = pd.DataFrame() 
             
-        # 3. Join
+        # 4. Join Clientes + Leads
         if not df_leads.empty:
             df_leads = df_leads.astype(str)
             df_protheus = df_protheus.astype(str)
@@ -92,24 +123,26 @@ def carregar_dados_completos():
 
         # Tratamento Clientes
         if not df_clientes.empty:
-            df_clientes.columns = df_clientes.columns.str.strip() # Remove espaços nos nomes das colunas
+            df_clientes.columns = df_clientes.columns.str.strip()
             df_clientes['ID_Cliente_CNPJ_CPF'] = df_clientes['ID_Cliente_CNPJ_CPF'].astype(str)
+            if 'Ultimo_Vendedor' in df_clientes.columns:
+                df_clientes['Ultimo_Vendedor'] = df_clientes['Ultimo_Vendedor'].astype(str).str.strip()
             
+            # APLICAÇÃO DA CORREÇÃO MONETÁRIA
             if 'Total_Compras' in df_clientes.columns:
                 df_clientes['Total_Compras'] = df_clientes['Total_Compras'].apply(limpar_valor_monetario)
-            else: df_clientes['Total_Compras'] = 0.0
-
+            
             if 'Data_Ultima_Compra' in df_clientes.columns:
                 df_clientes['Data_Ultima_Compra'] = pd.to_datetime(df_clientes['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
         
-        # 4. Interações
+        # 5. Interações
         try:
             sheet_interacoes = spreadsheet.worksheet("Interacoes")
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
             if not df_interacoes.empty:
+                # APLICAÇÃO DA CORREÇÃO MONETÁRIA
                 if 'Valor_Proposta' in df_interacoes.columns:
                     df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].apply(limpar_valor_monetario)
-                else: df_interacoes['Valor_Proposta'] = 0.0
                 
                 if 'Data' in df_interacoes.columns:
                     df_interacoes['Data_Obj'] = pd.to_datetime(df_interacoes['Data'], dayfirst=True, errors='coerce').dt.date
@@ -121,19 +154,12 @@ def carregar_dados_completos():
         except:
             df_interacoes = pd.DataFrame(columns=['CNPJ_Cliente', 'Data', 'Tipo', 'Resumo', 'Vendedor', 'Valor_Proposta'])
 
-        # 5. Config (Gestores e Canais)
-        try:
-            sheet_config = spreadsheet.worksheet("Config_Equipe")
-            df_config = pd.DataFrame(sheet_config.get_all_records())
-        except:
-            df_config = pd.DataFrame(columns=['Usuario_Login', 'Carteiras_Visiveis'])
-
         return df_clientes, df_interacoes, df_config
     except Exception as e:
         st.error(f"Erro Crítico de Leitura: {e}")
         return None, None, None
 
-# --- SALVAMENTO ---
+# --- SALVAMENTO (COM FORMATAÇÃO STRING BR) ---
 def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor=0.0):
     try:
         spreadsheet = conectar_google_sheets()
@@ -174,12 +200,10 @@ def processar_salvamento_lead(usuario_logado):
     tel = st.session_state["novo_tel"]
     resumo = st.session_state["novo_resumo"]
     val = st.session_state["novo_val"]
-
     if not nome or not doc or origem == "SELECIONE..." or acao == "SELECIONE...":
         st.error("Campos obrigatórios!")
     else:
-        sucesso = salvar_novo_lead_completo(doc, nome, contato, tel, usuario_logado, origem, acao, resumo, val)
-        if sucesso:
+        if salvar_novo_lead_completo(doc, nome, contato, tel, usuario_logado, origem, acao, resumo, val):
             st.success("Salvo!")
             for k in ["novo_nome", "novo_doc", "novo_contato", "novo_tel", "novo_resumo"]:
                 st.session_state[k] = ""
@@ -190,20 +214,59 @@ def processar_salvamento_lead(usuario_logado):
 def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
     obs = st.session_state["obs_temp"]
     val = st.session_state["val_temp"]
-    sucesso = salvar_interacao_nuvem(cid, datetime.now(), tipo_selecionado, obs, usuario_logado, val)
-    if sucesso:
+    if salvar_interacao_nuvem(cid, datetime.now(), tipo_selecionado, obs, usuario_logado, val):
         st.success("Salvo!")
         st.session_state["obs_temp"] = ""
         st.session_state["val_temp"] = 0.0
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 8.0")
-    df, df_interacoes, df_config = carregar_dados_completos()
-    placeholder.empty()
+    st.sidebar.title("🚀 CRM Master 9.0")
+    
+    # 1. Carrega dados (Necessário para validar login)
+    with st.spinner("Conectando ao banco de dados..."):
+        df, df_interacoes, df_config = carregar_dados_completos()
 
-    if df is not None and not df.empty:
-        # Lógica de Status
+    if df is not None and not df_config.empty:
+        # --- LOGIN BLINDADO ---
+        # Apenas usuários cadastrados na Config_Equipe aparecem
+        usuarios_validos = sorted(df_config['Usuario'].unique().tolist())
+        
+        # Session State para Login
+        if 'logado' not in st.session_state: st.session_state['logado'] = False
+        if 'usuario_atual' not in st.session_state: st.session_state['usuario_atual'] = ""
+        
+        if not st.session_state['logado']:
+            st.sidebar.markdown("### 🔒 Acesso Restrito")
+            usuario_input = st.sidebar.selectbox("Usuário:", usuarios_validos)
+            senha_input = st.sidebar.text_input("Senha:", type="password")
+            
+            if st.sidebar.button("Entrar"):
+                # Valida Senha
+                user_data = df_config[df_config['Usuario'] == usuario_input].iloc[0]
+                if str(user_data['Senha']).strip() == str(senha_input).strip():
+                    st.session_state['logado'] = True
+                    st.session_state['usuario_atual'] = usuario_input
+                    st.rerun()
+                else:
+                    st.sidebar.error("Senha incorreta!")
+            st.stop() # Para a execução aqui se não estiver logado
+        
+        # --- USUÁRIO LOGADO ---
+        usuario_logado = st.session_state['usuario_atual']
+        
+        # Botão de Logout
+        if st.sidebar.button(f"Sair ({usuario_logado})"):
+            st.session_state['logado'] = False
+            st.rerun()
+
+        # Pega dados do usuário
+        user_data = df_config[df_config['Usuario'] == usuario_logado].iloc[0]
+        tipo_usuario = str(user_data['Tipo']).upper().strip()
+        # Lista de Carteiras permitidas (Separa por vírgula)
+        carteiras_permitidas = [x.strip() for x in str(user_data['Carteira_Alvo']).split(',')]
+
+        # --- Lógica de Status ---
         hoje = datetime.now().date()
         if 'Data_Ultima_Compra' in df.columns:
             df['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df['Data_Ultima_Compra']).dt.days
@@ -229,45 +292,13 @@ try:
             if pd.isna(linha['Dias_Sem_Comprar']): return '🆕 NOVO S/ INTERAÇÃO'
             if linha['Dias_Sem_Comprar'] >= 60: return '🔴 RECUPERAR'
             return '🟢 ATIVO'
-
+        
         df['Status'] = df.apply(calcular_status, axis=1)
 
-        # --- SISTEMA DE LOGIN UNIFICADO ---
-        # Lista Vendedores + Gestores
-        lista_vendedores = df['Ultimo_Vendedor'].dropna().unique().tolist() if 'Ultimo_Vendedor' in df.columns else []
-        lista_gestores = df_config['Usuario_Login'].unique().tolist() if not df_config.empty else []
-        
-        # Remove duplicados e ordena
-        todos_usuarios = sorted(list(set(lista_vendedores + lista_gestores)))
-        # Se não tiver lista_gestores no config, adiciona GESTOR padrao por segurança
-        if not lista_gestores: todos_usuarios.insert(0, "GESTOR")
-        
-        usuario_logado = st.sidebar.selectbox("Usuário:", todos_usuarios)
-
-        # --- IDENTIFICAÇÃO DE PAPEL (Role) ---
-        is_gestor = False
-        carteiras_do_gestor = []
-        
-        if not df_config.empty and usuario_logado in df_config['Usuario_Login'].values:
-            is_gestor = True
-            regra = df_config[df_config['Usuario_Login'] == usuario_logado].iloc[0]
-            carteiras_txt = regra['Carteiras_Visiveis']
-            if "TODOS" in carteiras_txt.upper():
-                carteiras_do_gestor = "TODOS"
-            else:
-                carteiras_do_gestor = [n.strip() for n in carteiras_txt.split(',')]
-        
-        # Caso especial: Login "GESTOR" hardcoded
-        if usuario_logado == "GESTOR": 
-            is_gestor = True
-            carteiras_do_gestor = "TODOS"
-
-        # --- MENU CADASTRO (Apenas se não for GESTOR puro, ou se for vendedor tbm) ---
-        # Se o usuário não está na lista de gestores OU está mas quer vender também
-        if not is_gestor or (is_gestor and usuario_logado in lista_vendedores):
+        # --- MENU CADASTRO (Apenas se for Vendedor ou tiver permissão) ---
+        if tipo_usuario == "VENDEDOR" or "TODOS" in carteiras_permitidas:
             st.sidebar.markdown("---")
             with st.sidebar.expander("➕ Cadastrar Novo Lead"):
-                # States
                 for k in ["novo_nome", "novo_doc", "novo_contato", "novo_tel", "novo_resumo"]:
                     if k not in st.session_state: st.session_state[k] = ""
                 if "novo_val" not in st.session_state: st.session_state["novo_val"] = 0.0
@@ -278,33 +309,35 @@ try:
                 st.text_input("CPF/CNPJ:", key="novo_doc")
                 st.text_input("Contato:", key="novo_contato")
                 st.text_input("Telefone:", key="novo_tel")
-                
                 c1, c2 = st.columns(2)
                 c1.selectbox("Origem:", ["SELECIONE...", "SZ.CHAT", "LIGAÇÃO", "PRESENCIAL", "E-MAIL", "INDICAÇÃO"], key="novo_origem")
                 c2.selectbox("Ação:", ["SELECIONE...", "Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"], key="novo_acao")
-                
                 if st.session_state["novo_acao"] == "Orçamento Enviado":
                     st.number_input("Valor (R$):", step=0.01, format="%.2f", key="novo_val")
                 st.text_area("Resumo:", key="novo_resumo")
                 st.button("💾 SALVAR LEAD", type="primary", on_click=processar_salvamento_lead, args=(usuario_logado,))
 
-        # --- VISÃO DO GESTOR ---
-        if is_gestor:
-            st.title(f"📊 Painel de Gestão: {usuario_logado}")
+        # --- ROTEAMENTO DE VISÃO ---
+        
+        # FILTRO DE DADOS SEGURO
+        if "TODOS" in carteiras_permitidas:
+            meus_clientes = df
+            minhas_interacoes = df_interacoes
+        else:
+            # Filtra clientes onde Ultimo_Vendedor está na lista permitida
+            if 'Ultimo_Vendedor' in df.columns:
+                meus_clientes = df[df['Ultimo_Vendedor'].isin(carteiras_permitidas)]
+            else: meus_clientes = pd.DataFrame()
             
-            # Filtra dados do time do gestor
-            if carteiras_do_gestor == "TODOS":
-                meus_clientes_gestao = df
-                minhas_interacoes = df_interacoes
-            else:
-                if 'Ultimo_Vendedor' in df.columns:
-                    meus_clientes_gestao = df[df['Ultimo_Vendedor'].isin(carteiras_do_gestor)]
-                else: meus_clientes_gestao = pd.DataFrame()
-                
-                if not df_interacoes.empty and 'Vendedor' in df_interacoes.columns:
-                    minhas_interacoes = df_interacoes[df_interacoes['Vendedor'].isin(carteiras_do_gestor)]
-                else: minhas_interacoes = pd.DataFrame()
+            # Filtra interações
+            if not df_interacoes.empty and 'Vendedor' in df_interacoes.columns:
+                minhas_interacoes = df_interacoes[df_interacoes['Vendedor'].isin(carteiras_permitidas)]
+            else: minhas_interacoes = pd.DataFrame()
 
+        # --- VIEW GESTOR ---
+        if tipo_usuario == "GESTOR":
+            st.title(f"📊 Gestão: {usuario_logado}")
+            
             with st.container(border=True):
                 col_f1, col_f2, col_f3 = st.columns(3)
                 d_ini = col_f1.date_input("De:", value=hoje - timedelta(days=30), format="DD/MM/YYYY")
@@ -336,7 +369,7 @@ try:
             
             st.divider()
 
-            t1, t2 = st.tabs(["🏆 Ranking Time", "📝 Detalhes"])
+            t1, t2 = st.tabs(["🏆 Ranking", "📝 Detalhes"])
             with t1:
                 if not df_filtered.empty:
                     df_filtered['Is_Orcamento'] = (df_filtered['Tipo'] == 'Orçamento Enviado').astype(int)
@@ -356,36 +389,21 @@ try:
                     view = df_tabela[['Data_Obj', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta', 'Vendedor']].copy()
                     view['Valor_Proposta'] = view['Valor_Proposta'].apply(formatar_moeda_visual)
                     view.rename(columns={'Data_Obj': 'Data'}, inplace=True)
-                    st.dataframe(
-                        view, 
-                        use_container_width=True, 
-                        hide_index=True,
-                        column_config={"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")}
-                    )
+                    st.dataframe(view, use_container_width=True, hide_index=True, column_config={"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")})
                 else: st.info("Nenhuma interação.")
 
-        # --- VISÃO DO VENDEDOR ---
+        # --- VIEW VENDEDOR ---
         else:
-            st.title(f"💼 Área de Vendas: {usuario_logado}")
+            st.title(f"💼 Vendas: {usuario_logado}")
             
-            # Filtra apenas clientes deste vendedor
-            if 'Ultimo_Vendedor' in df.columns:
-                meus_clientes = df[df['Ultimo_Vendedor'] == usuario_logado]
-            else: meus_clientes = pd.DataFrame()
-
-            # Variável de Seleção
-            cid = None
-
             if meus_clientes.empty:
-                st.warning("Sua carteira está vazia.")
+                st.warning("Nenhum cliente atribuído a você.")
             else:
                 c_esq, c_dir = st.columns([1, 1])
                 
-                # --- COLUNA ESQUERDA: LISTA E BUSCA ---
                 with c_esq:
-                    st.subheader("Minha Carteira")
+                    st.subheader("Carteira")
                     termo_busca = st.text_input("🔍 Buscar (CNPJ ou Nome):", placeholder="Digite...")
-                    
                     if termo_busca:
                         termo_busca = termo_busca.upper()
                         lista = meus_clientes[
@@ -395,27 +413,23 @@ try:
                         if lista.empty: st.warning("Não encontrado.")
                     else:
                         ops = ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '💬 WHATSAPP INICIADO', '👎 VENDA PERDIDA', '⭐ VENDA RECENTE', '🟢 ATIVO']
-                        # FILTRO PADRÃO PEDIDO: NEGOCIAÇÃO E FOLLOW-UP
                         sel_status = st.multiselect("Filtrar:", ops, default=['⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO'])
                         lista = meus_clientes[meus_clientes['Status'].isin(sel_status)].sort_values('Status', ascending=False)
                         if lista.empty: st.info("Nenhum cliente com estes filtros.")
 
+                    cid = None
                     if not lista.empty:
-                        # CAIXA DE ROLAGEM PEDIDA
                         with st.container(height=600):
-                            # FORMATAÇÃO PEDIDA: CNPJ | RAZÃO SOCIAL
                             cid = st.radio(
                                 "Selecione:", 
                                 lista['ID_Cliente_CNPJ_CPF'].tolist(), 
                                 format_func=lambda x: f"{formatar_documento(x)} | {lista[lista['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}"
                             )
 
-                # --- COLUNA DIREITA: DETALHES ---
                 with c_dir:
                     if cid and not meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cid].empty:
                         cli = meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cid].iloc[0]
                         with st.container(border=True):
-                            # CABEÇALHO
                             st.markdown(f"### {cli['Nome_Fantasia']}")
                             doc_fmt = formatar_documento(cli['ID_Cliente_CNPJ_CPF'])
                             st.caption(f"🆔 {doc_fmt}")
@@ -423,20 +437,15 @@ try:
                             
                             st.divider()
                             st.markdown("#### 📋 Dados do Cliente")
-                            
-                            # CAMPOS SOLICITADOS (COM PROTEÇÃO CONTRA COLUNAS INEXISTENTES)
                             col_d1, col_d2 = st.columns(2)
                             
-                            # Coluna 1
                             v_contato = cli.get('Nome_Contato', '-') if 'Nome_Contato' in cli else cli.get('Contato', '-')
                             v_email = cli.get('Email', '-') if 'Email' in cli else '-'
                             v_tel1 = cli.get('Telefone_Contato1', '-') if 'Telefone_Contato1' in cli else '-'
-                            
                             col_d1.write(f"**👤 Contato:** {v_contato}")
                             col_d1.write(f"**📧 Email:** {v_email}")
                             col_d1.write(f"**📞 Tel 1:** {v_tel1}")
 
-                            # Coluna 2
                             v_tel2 = cli.get('Telefone_Contato2', '-') if 'Telefone_Contato2' in cli else '-'
                             v_compra = formatar_moeda_visual(cli['Total_Compras']) if 'Total_Compras' in cli else "R$ 0,00"
                             v_dt_compra = formatar_data_br(cli['Data_Ultima_Compra']) if 'Data_Ultima_Compra' in cli else "-"
@@ -447,13 +456,11 @@ try:
                             col_d2.write(f"**📅 Última Compra:** {v_dt_compra}")
                             col_d2.write(f"**👔 Carteira:** {v_dono}")
                             
-                            # PROTEÇÃO FUTURA (CIDADES/UF)
                             if 'Cidade' in cli and 'UF' in cli:
                                 st.write(f"📍 **Local:** {cli['Cidade']}/{cli['UF']}")
 
                             st.divider()
                             
-                            # HISTÓRICO
                             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                                 hist = df_interacoes[df_interacoes['CNPJ_Cliente'] == str(cid)].sort_values('Data_Obj', ascending=False)
                                 if not hist.empty:
@@ -464,7 +471,6 @@ try:
                                         v_fmt = formatar_moeda_visual(last['Valor_Proposta'])
                                         st.info(f"💰 **Proposta Aberta:** {v_fmt}")
                             
-                            # AÇÕES
                             st.markdown("#### 📝 Nova Interação")
                             if "obs_temp" not in st.session_state: st.session_state["obs_temp"] = ""
                             if "val_temp" not in st.session_state: st.session_state["val_temp"] = 0.0
@@ -476,12 +482,6 @@ try:
                             st.button("✅ Salvar", type="primary", on_click=processar_salvamento_vendedor, args=(cid, usuario_logado, tipo))
                     else:
                         st.info("👈 Selecione um cliente na lista.")
-
-    else:
-        st.error("Não foi possível carregar os dados. Tente atualizar a página.")
-        if st.button("🔄 Recarregar"):
-            st.cache_data.clear()
-            st.rerun()
 
 except Exception as e:
     st.error(f"Erro Fatal no Sistema: {e}")
