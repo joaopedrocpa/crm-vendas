@@ -7,17 +7,32 @@ import json
 import time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="CRM Master 9.0", layout="wide")
+st.set_page_config(page_title="CRM Master 9.1", layout="wide")
 
-# --- CSS PARA REMOVER MARGENS E MELHORAR VISUAL ---
+# --- CSS CORRIGIDO (VISUAL DARK & CARDS LEGÍVEIS) ---
 st.markdown("""
 <style>
+    /* Ajuste da Barra Lateral */
     [data-testid="stSidebar"] {min-width: 300px;}
-    .stMetric {background-color: #f0f2f6; padding: 10px; border-radius: 10px;}
+    
+    /* CORREÇÃO DOS CARDS (KPIs) - Fundo Escuro e Letra Clara */
+    div[data-testid="stMetric"] {
+        background-color: #1E1E1E; /* Fundo Preto Suave */
+        border: 1px solid #333;
+        padding: 15px;
+        border-radius: 8px;
+    }
+    div[data-testid="stMetricLabel"] {
+        color: #b0b3b8 !important; /* Cor do Título (Cinza Claro) */
+        font-weight: bold;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #ffffff !important; /* Cor do Valor (Branco Puro) */
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES DE FORMATAÇÃO E LIMPEZA (CORREÇÃO 10x) ---
+# --- FUNÇÕES DE FORMATAÇÃO E LIMPEZA ---
 def formatar_moeda_visual(valor):
     if pd.isna(valor) or str(valor).strip() == '': return "R$ 0,00"
     try:
@@ -26,24 +41,23 @@ def formatar_moeda_visual(valor):
 
 def limpar_valor_monetario(valor):
     """
-    Função Agressiva para corrigir erro de multiplicação por 10x.
-    Prioriza o padrão brasileiro (vírgula como decimal).
+    Função Híbrida: Lê números puros (da nova versão) e textos antigos.
     """
     if pd.isna(valor): return 0.0
-    s = str(valor).strip()
     
-    # Se for número puro vindo do Excel (float ou int), retorna direto
+    # SE JÁ FOR NÚMERO (Solução Definitiva), retorna direto
     if isinstance(valor, (int, float)):
         return float(valor)
 
-    # Limpeza de texto
+    s = str(valor).strip()
+    if s == '': return 0.0
+    
+    # Limpeza de texto antigo (R$ 1.000,00)
     s = s.replace('R$', '').strip()
     
-    # LÓGICA BLINDADA BRASILEIRA:
-    # 1. Removemos TODOS os pontos (separadores de milhar) -> 1.000,00 vira 1000,00
-    s = s.replace('.', '')
-    # 2. Trocamos a vírgula por ponto (decimal) -> 1000,00 vira 1000.00
-    s = s.replace(',', '.')
+    # Lógica Brasileira para Textos Antigos:
+    # Remove ponto de milhar e troca vírgula decimal por ponto
+    s = s.replace('.', '').replace(',', '.')
     
     try:
         return float(s)
@@ -51,7 +65,6 @@ def limpar_valor_monetario(valor):
         return 0.0
 
 def formatar_documento(valor):
-    """Aplica máscara de CPF ou CNPJ"""
     if pd.isna(valor) or str(valor).strip() == '': return "-"
     doc = ''.join(filter(str.isdigit, str(valor)))
     if not doc: return "-"
@@ -87,15 +100,14 @@ def carregar_dados_completos():
     spreadsheet = conectar_google_sheets()
     if spreadsheet is None: return None, None, None
     try:
-        # 1. Config (AGORA É O PRIMEIRO A CARREGAR PARA VALIDAR LOGIN)
+        # 1. Config
         try:
             sheet_config = spreadsheet.worksheet("Config_Equipe")
             df_config = pd.DataFrame(sheet_config.get_all_records())
-            # Força colunas como string para evitar erros
             for col in df_config.columns:
                 df_config[col] = df_config[col].astype(str)
         except:
-            st.error("Aba 'Config_Equipe' não encontrada ou fora do padrão!")
+            st.error("Aba 'Config_Equipe' não encontrada!")
             return None, None, None
 
         # 2. Clientes
@@ -113,7 +125,7 @@ def carregar_dados_completos():
             df_leads = pd.DataFrame(dados_leads)
         except: df_leads = pd.DataFrame() 
             
-        # 4. Join Clientes + Leads
+        # 4. Join
         if not df_leads.empty:
             df_leads = df_leads.astype(str)
             df_protheus = df_protheus.astype(str)
@@ -128,7 +140,6 @@ def carregar_dados_completos():
             if 'Ultimo_Vendedor' in df_clientes.columns:
                 df_clientes['Ultimo_Vendedor'] = df_clientes['Ultimo_Vendedor'].astype(str).str.strip()
             
-            # APLICAÇÃO DA CORREÇÃO MONETÁRIA
             if 'Total_Compras' in df_clientes.columns:
                 df_clientes['Total_Compras'] = df_clientes['Total_Compras'].apply(limpar_valor_monetario)
             
@@ -140,7 +151,6 @@ def carregar_dados_completos():
             sheet_interacoes = spreadsheet.worksheet("Interacoes")
             df_interacoes = pd.DataFrame(sheet_interacoes.get_all_records())
             if not df_interacoes.empty:
-                # APLICAÇÃO DA CORREÇÃO MONETÁRIA
                 if 'Valor_Proposta' in df_interacoes.columns:
                     df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].apply(limpar_valor_monetario)
                 
@@ -159,14 +169,18 @@ def carregar_dados_completos():
         st.error(f"Erro Crítico de Leitura: {e}")
         return None, None, None
 
-# --- SALVAMENTO (COM FORMATAÇÃO STRING BR) ---
+# --- SALVAMENTO (AGORA SALVA NÚMERO PURO) ---
 def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor=0.0):
     try:
         spreadsheet = conectar_google_sheets()
         sheet = spreadsheet.worksheet("Interacoes")
         data_str = data_obj.strftime('%d/%m/%Y')
-        valor_str = f"{valor:.2f}".replace('.', ',') 
-        sheet.append_row([str(cnpj), data_str, tipo, resumo, vendedor, valor_str])
+        
+        # MUDANÇA CRUCIAL: Envia o FLOAT puro, não string
+        # O Google Sheets vai receber 150.25 e tratar como número
+        valor_save = float(valor)
+        
+        sheet.append_row([str(cnpj), data_str, tipo, resumo, vendedor, valor_save])
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -182,8 +196,11 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         
         sheet_interacoes = spreadsheet.worksheet("Interacoes")
         data_str = datetime.now().strftime('%d/%m/%Y')
-        valor_str = f"{valor_inicial:.2f}".replace('.', ',')
-        sheet_interacoes.append_row([str(cnpj), data_str, primeira_acao, resumo_inicial, vendedor, valor_str])
+        
+        # MUDANÇA CRUCIAL: Envia o FLOAT puro
+        valor_save = float(valor_inicial)
+        
+        sheet_interacoes.append_row([str(cnpj), data_str, primeira_acao, resumo_inicial, vendedor, valor_save])
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -221,18 +238,15 @@ def processar_salvamento_vendedor(cid, usuario_logado, tipo_selecionado):
 
 # --- APP ---
 try:
-    st.sidebar.title("🚀 CRM Master 9.0")
+    st.sidebar.title("🚀 CRM Master 9.1")
     
-    # 1. Carrega dados (Necessário para validar login)
     with st.spinner("Conectando ao banco de dados..."):
         df, df_interacoes, df_config = carregar_dados_completos()
 
     if df is not None and not df_config.empty:
         # --- LOGIN BLINDADO ---
-        # Apenas usuários cadastrados na Config_Equipe aparecem
         usuarios_validos = sorted(df_config['Usuario'].unique().tolist())
         
-        # Session State para Login
         if 'logado' not in st.session_state: st.session_state['logado'] = False
         if 'usuario_atual' not in st.session_state: st.session_state['usuario_atual'] = ""
         
@@ -242,7 +256,6 @@ try:
             senha_input = st.sidebar.text_input("Senha:", type="password")
             
             if st.sidebar.button("Entrar"):
-                # Valida Senha
                 user_data = df_config[df_config['Usuario'] == usuario_input].iloc[0]
                 if str(user_data['Senha']).strip() == str(senha_input).strip():
                     st.session_state['logado'] = True
@@ -250,23 +263,19 @@ try:
                     st.rerun()
                 else:
                     st.sidebar.error("Senha incorreta!")
-            st.stop() # Para a execução aqui se não estiver logado
+            st.stop()
         
-        # --- USUÁRIO LOGADO ---
+        # --- LOGADO ---
         usuario_logado = st.session_state['usuario_atual']
-        
-        # Botão de Logout
         if st.sidebar.button(f"Sair ({usuario_logado})"):
             st.session_state['logado'] = False
             st.rerun()
 
-        # Pega dados do usuário
         user_data = df_config[df_config['Usuario'] == usuario_logado].iloc[0]
         tipo_usuario = str(user_data['Tipo']).upper().strip()
-        # Lista de Carteiras permitidas (Separa por vírgula)
         carteiras_permitidas = [x.strip() for x in str(user_data['Carteira_Alvo']).split(',')]
 
-        # --- Lógica de Status ---
+        # --- LÓGICA STATUS ---
         hoje = datetime.now().date()
         if 'Data_Ultima_Compra' in df.columns:
             df['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df['Data_Ultima_Compra']).dt.days
@@ -295,7 +304,7 @@ try:
         
         df['Status'] = df.apply(calcular_status, axis=1)
 
-        # --- MENU CADASTRO (Apenas se for Vendedor ou tiver permissão) ---
+        # --- MENU CADASTRO ---
         if tipo_usuario == "VENDEDOR" or "TODOS" in carteiras_permitidas:
             st.sidebar.markdown("---")
             with st.sidebar.expander("➕ Cadastrar Novo Lead"):
@@ -317,19 +326,14 @@ try:
                 st.text_area("Resumo:", key="novo_resumo")
                 st.button("💾 SALVAR LEAD", type="primary", on_click=processar_salvamento_lead, args=(usuario_logado,))
 
-        # --- ROTEAMENTO DE VISÃO ---
-        
-        # FILTRO DE DADOS SEGURO
+        # --- ROTEAMENTO ---
         if "TODOS" in carteiras_permitidas:
             meus_clientes = df
             minhas_interacoes = df_interacoes
         else:
-            # Filtra clientes onde Ultimo_Vendedor está na lista permitida
             if 'Ultimo_Vendedor' in df.columns:
                 meus_clientes = df[df['Ultimo_Vendedor'].isin(carteiras_permitidas)]
             else: meus_clientes = pd.DataFrame()
-            
-            # Filtra interações
             if not df_interacoes.empty and 'Vendedor' in df_interacoes.columns:
                 minhas_interacoes = df_interacoes[df_interacoes['Vendedor'].isin(carteiras_permitidas)]
             else: minhas_interacoes = pd.DataFrame()
@@ -395,12 +399,10 @@ try:
         # --- VIEW VENDEDOR ---
         else:
             st.title(f"💼 Vendas: {usuario_logado}")
-            
             if meus_clientes.empty:
                 st.warning("Nenhum cliente atribuído a você.")
             else:
                 c_esq, c_dir = st.columns([1, 1])
-                
                 with c_esq:
                     st.subheader("Carteira")
                     termo_busca = st.text_input("🔍 Buscar (CNPJ ou Nome):", placeholder="Digite...")
@@ -420,11 +422,7 @@ try:
                     cid = None
                     if not lista.empty:
                         with st.container(height=600):
-                            cid = st.radio(
-                                "Selecione:", 
-                                lista['ID_Cliente_CNPJ_CPF'].tolist(), 
-                                format_func=lambda x: f"{formatar_documento(x)} | {lista[lista['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}"
-                            )
+                            cid = st.radio("Selecione:", lista['ID_Cliente_CNPJ_CPF'].tolist(), format_func=lambda x: f"{formatar_documento(x)} | {lista[lista['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}")
 
                 with c_dir:
                     if cid and not meus_clientes[meus_clientes['ID_Cliente_CNPJ_CPF'] == cid].empty:
@@ -460,7 +458,6 @@ try:
                                 st.write(f"📍 **Local:** {cli['Cidade']}/{cli['UF']}")
 
                             st.divider()
-                            
                             if not df_interacoes.empty and 'CNPJ_Cliente' in df_interacoes.columns:
                                 hist = df_interacoes[df_interacoes['CNPJ_Cliente'] == str(cid)].sort_values('Data_Obj', ascending=False)
                                 if not hist.empty:
