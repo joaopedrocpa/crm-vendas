@@ -11,10 +11,10 @@ import time
 import numpy as np
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 24.2", layout="wide")
+st.set_page_config(page_title="CRM Master 24.3", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
-# --- CSS (Visual Dark & Scroll) ---
+# --- CSS ---
 st.markdown("""
 <style>
     [data-testid="stSidebar"] {min-width: 300px;}
@@ -25,7 +25,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. FUNÇÕES AUXILIARES ---
+# --- 2. HELPERS ---
 def gerar_id_proposta(): return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
 def extrair_id(t): 
@@ -51,7 +51,7 @@ def fmt_doc(v):
     d = ''.join(filter(str.isdigit, str(v)))
     return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}" if len(d)>11 else f"{d[:3]}.{d[3:6]}.{d[6:9]}-{d[9:]}"
 
-# --- 3. CONEXÃO GOOGLE ---
+# --- 3. CONEXÃO ---
 def conectar_google_sheets():
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(st.secrets["credenciais_google"]), ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
@@ -60,7 +60,7 @@ def conectar_google_sheets():
         st.error(f"Erro Conexão: {e}")
         return None
 
-# --- 4. CARREGAMENTO COM CACHE ---
+# --- 4. CARREGAMENTO ---
 @st.cache_data(ttl=3600)
 def carregar_dados_cache():
     ss = conectar_google_sheets()
@@ -94,6 +94,7 @@ def carregar_dados_cache():
         df_int = pd.DataFrame(ss.worksheet("Interacoes").get_all_records())
         if not df_int.empty:
             if 'Valor_Proposta' in df_int.columns: df_int['Valor_Proposta'] = df_int['Valor_Proposta'].apply(limpar_int)
+            # CORREÇÃO CRÍTICA 1: Garantir que Data_Obj seja sempre date (sem hora)
             if 'Data' in df_int.columns: df_int['Data_Obj'] = pd.to_datetime(df_int['Data'], dayfirst=True, errors='coerce').dt.date
             df_int['CNPJ_Cliente'] = df_int['CNPJ_Cliente'].astype(str)
             
@@ -132,16 +133,27 @@ def recalcular_status_massa(df_c, df_i):
     df_c.loc[df_c['ID_Cliente_CNPJ_CPF'].isin(cnpjs_neg), 'Status'] = '⏳ NEGOCIAÇÃO'
     return df_c
 
-# --- 6. FUNÇÕES SALVAMENTO ---
-def salvar_nuvem(cnpj, data, tipo, resumo, vend, val):
+# --- 6. SALVAMENTO ---
+def salvar_nuvem(cnpj, data_input, tipo, resumo, vend, val):
     try:
+        # CORREÇÃO CRÍTICA 2: Garantir que data_input seja .date() (sem hora)
+        if isinstance(data_input, datetime):
+            data_obj = data_input.date()
+        else:
+            data_obj = data_input
+
         ss = conectar_google_sheets()
-        ss.worksheet("Interacoes").append_row([str(cnpj), data.strftime('%d/%m/%Y'), tipo, resumo, vend, int(val)])
-        novo = {'CNPJ_Cliente':str(cnpj),'Data_Obj':data,'Tipo':tipo,'Resumo':resumo,'Vendedor':vend,'Valor_Proposta':int(val),'Nome_Cliente':'...'}
+        # Salva como String no Google
+        ss.worksheet("Interacoes").append_row([str(cnpj), data_obj.strftime('%d/%m/%Y'), tipo, resumo, vend, int(val)])
+        
+        # Salva como Date Object na Memória
+        novo = {'CNPJ_Cliente':str(cnpj),'Data_Obj':data_obj,'Tipo':tipo,'Resumo':resumo,'Vendedor':vend,'Valor_Proposta':int(val),'Nome_Cliente':'...'}
         st.session_state['df_int'] = pd.concat([st.session_state['df_int'], pd.DataFrame([novo])], ignore_index=True)
         st.session_state['df_cli'] = recalcular_status_massa(st.session_state['df_cli'], st.session_state['df_int'])
         return True
-    except: return False
+    except Exception as e:
+        st.error(f"Erro ao salvar: {e}")
+        return False
 
 def salvar_lead(nome, doc, cont, tel, vend, ori, acao, res, val):
     try:
@@ -200,7 +212,7 @@ if not st.session_state['logado']:
         else: st.error("Senha Incorreta")
     st.stop()
 
-# ESTADO USUÁRIO
+# ESTADO
 u_log = st.session_state['u_atual']
 df_cli = st.session_state['df_cli']
 df_int = st.session_state['df_int']
@@ -208,7 +220,7 @@ u_data = df_cfg[df_cfg['Usuario']==u_log].iloc[0]
 tipo_u = str(u_data['Tipo']).upper().strip()
 carts = [x.strip() for x in str(u_data['Carteira_Alvo']).split(',')]
 
-# --- SIDEBAR ---
+# SIDEBAR
 if URL_LOGO: st.sidebar.image(URL_LOGO, width=150)
 st.sidebar.title(f"Olá, {u_log}")
 
@@ -216,35 +228,46 @@ if st.sidebar.button("🔄 Atualizar"): st.cache_data.clear(); st.rerun()
 if st.sidebar.button("Sair"): st.session_state['logado'] = False; st.rerun()
 st.sidebar.divider()
 
-# --- CÁLCULO DE METAS E REALIZADO ---
+# METAS
 prim_dia = datetime.now().date().replace(day=1)
 
-# Definição das Metas (Lógica da Soma para Gestor)
 if tipo_u == "GESTOR":
-    # Soma todas as metas de quem é VENDEDOR na planilha Config
     vendedores_cfg = df_cfg[df_cfg['Tipo'] == 'VENDEDOR']
     mf = vendedores_cfg['Meta_Fat'].sum()
     mc = vendedores_cfg['Meta_Clientes'].sum()
     ma = vendedores_cfg['Meta_Atividades'].sum()
     
-    # Realizado do Gestor = Soma de toda a equipe (filtrado por quem é vendedor)
     if not df_int.empty:
-        # Filtra interações do mês
         df_mes_gestor = df_int[df_int['Data_Obj'] >= prim_dia]
-        # Opcional: Filtrar apenas vendedores cadastrados, caso tenha gente antiga
         lista_vendedores = vendedores_cfg['Usuario'].unique().tolist()
         df_mes_gestor = df_mes_gestor[df_mes_gestor['Vendedor'].isin(lista_vendedores)]
-        
         fat_r = df_mes_gestor[df_mes_gestor['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()
         cli_r = df_mes_gestor[df_mes_gestor['Tipo']=='Venda Fechada']['CNPJ_Cliente'].nunique()
         ativ_r = len(df_mes_gestor[df_mes_gestor['Tipo'].isin(['Ligação Realizada','WhatsApp Enviado','Agendou Visita'])])
     else: fat_r=0; cli_r=0; ativ_r=0
-
 else:
-    # Vendedor vê apenas a sua
     mf, mc, ma = u_data.get('Meta_Fat',0), u_data.get('Meta_Clientes',0), u_data.get('Meta_Atividades',0)
     if not df_int.empty:
-        df_m = df_int[(df_int['Vendedor']==u_log) & (df_int['Data_Obj']>=prim_dia)]
+        # CORREÇÃO CRÍTICA 3: Garantia de Comparação
+        # Converte a coluna Data_Obj para date() caso algum datetime tenha escapado
+        # Isso evita o erro de comparação entre Date e Timestamp
+        
+        # Filtro seguro:
+        mask_vendedor = df_int['Vendedor'] == u_log
+        
+        # Cria uma máscara de data segura
+        # Se Data_Obj for nulo, considera falso. Se for datetime, pega date.
+        def safe_date_compare(d):
+            if pd.isna(d): return False
+            if isinstance(d, datetime): return d.date() >= prim_dia
+            return d >= prim_dia
+
+        # Aplica o filtro de data linha a linha (mais lento, mas 100% seguro contra crash)
+        # Como é apenas para o sidebar do vendedor, o volume é pequeno, então ok.
+        mask_data = df_int['Data_Obj'].apply(safe_date_compare)
+        
+        df_m = df_int[mask_vendedor & mask_data]
+        
         fat_r = df_m[df_m['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()
         cli_r = df_m[df_m['Tipo']=='Venda Fechada']['CNPJ_Cliente'].nunique()
         ativ_r = len(df_m[df_m['Tipo'].isin(['Ligação Realizada','WhatsApp Enviado','Agendou Visita'])])
@@ -278,10 +301,10 @@ if "TODOS" in carts or tipo_u == "VENDEDOR":
         if st.button("Salvar Lead"):
             if salvar_lead(n,d,c,t,u_log,o,a,r,v): st.success("Salvo!"); time.sleep(1); st.rerun()
 
-# --- FILTRAGEM DADOS ---
+# --- FILTRAGEM ---
 if "TODOS" in carts:
     meus_cli = df_cli
-    minhas_int = df_int # Gestor vê tudo
+    minhas_int = df_int
 else:
     meus_cli = df_cli[df_cli['Ultimo_Vendedor'].isin(carts)]
     minhas_int = df_int[df_int['Vendedor'].isin(carts)]
@@ -293,20 +316,23 @@ if tipo_u == "GESTOR":
         c1,c2,c3 = st.columns(3)
         di = c1.date_input("De", value=datetime.now()-timedelta(days=30))
         df = c2.date_input("Até", value=datetime.now())
-        
-        # CORREÇÃO: Dropdown pega todos os vendedores cadastrados no CONFIG, não só quem vendeu
         lista_vendedores_completa = sorted(df_cfg[df_cfg['Tipo'] == 'VENDEDOR']['Usuario'].unique())
         sel_v = c3.multiselect("Vendedores", lista_vendedores_completa)
     
-    # Aplica filtros APÓS carregar tudo
     if not minhas_int.empty:
-        msk = (minhas_int['Data_Obj']>=di) & (minhas_int['Data_Obj']<=df)
-        if sel_v: msk &= minhas_int['Vendedor'].isin(sel_v)
-        dff = minhas_int[msk]
+        # Filtro de Data Seguro para Gestor também
+        def safe_date_filter(d):
+            if pd.isna(d): return False
+            if isinstance(d, datetime): d = d.date()
+            return di <= d <= df
+
+        mask_data_gestor = minhas_int['Data_Obj'].apply(safe_date_filter)
+        dff = minhas_int[mask_data_gestor]
+        
+        if sel_v: dff = dff[dff['Vendedor'].isin(sel_v)]
     else: dff = pd.DataFrame()
         
     if not dff.empty:
-        # Pipeline Logic
         resols = set(dff[dff['Tipo'].isin(['Venda Fechada','Venda Perdida'])]['Resumo'])
         ids_res = set([extrair_id(x) for x in resols if extrair_id(x)])
         peds_res = set([extrair_pedido_protheus(x) for x in resols if extrair_pedido_protheus(x)])
@@ -326,15 +352,12 @@ if tipo_u == "GESTOR":
             Cli=('CNPJ_Cliente', lambda x: x[dff.loc[x.index,'Tipo']=='Venda Fechada'].nunique())
         ).reset_index()
         
-        # Merge com Metas para Ranking
         df_metas_merge = df_cfg[['Usuario', 'Meta_Fat']].rename(columns={'Usuario':'Vendedor'})
         agg = pd.merge(agg, df_metas_merge, on='Vendedor', how='left').fillna(0)
         agg['% Meta'] = agg.apply(lambda x: f"{x['Fat']/x['Meta_Fat']*100:.0f}%" if x['Meta_Fat']>0 else "-", axis=1)
         agg['Fat'] = agg['Fat'].apply(fmt_moeda)
-        
         st.dataframe(agg, use_container_width=True)
-    else:
-        st.info("Sem dados para o período/vendedores selecionados.")
+    else: st.info("Sem dados.")
 
 # --- VIEW VENDEDOR ---
 else:
@@ -401,9 +424,9 @@ else:
                                 ca.markdown(f"**{fmt_data(r['Data_Obj'])}** | {fmt_moeda(r['Valor_Proposta'])}")
                                 ca.caption(r['Resumo'])
                                 if cb.button("✅", key=f"win_{i}"):
-                                    if salvar_nuvem(cid_selecionado, datetime.now(), "Venda Fechada", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
+                                    if salvar_nuvem(cid_selecionado, datetime.now().date(), "Venda Fechada", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
                                 if cc.button("❌", key=f"loss_{i}"):
-                                    if salvar_nuvem(cid_selecionado, datetime.now(), "Venda Perdida", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
+                                    if salvar_nuvem(cid_selecionado, datetime.now().date(), "Venda Perdida", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
                     else: st.info("Nada pendente.")
 
                 with tab3:
@@ -412,6 +435,6 @@ else:
                         vlr = st.number_input("Valor (R$) - Apenas Orçamento", step=1)
                         obs = st.text_area("Obs")
                         if st.form_submit_button("💾 Salvar"):
-                            if salvar_nuvem(cid_selecionado, datetime.now(), act, obs, u_log, vlr if act == "Orçamento Enviado" else 0):
+                            if salvar_nuvem(cid_selecionado, datetime.now().date(), act, obs, u_log, vlr if act == "Orçamento Enviado" else 0):
                                 st.success("Salvo!"); time.sleep(1); st.rerun()
         else: st.info("👈 Selecione um cliente.")
