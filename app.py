@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 24.3", layout="wide")
+st.set_page_config(page_title="CRM Master 24.4", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
 # --- CSS ---
@@ -40,6 +40,10 @@ def limpar_int(v):
     try: return int(re.sub(r'[^\d]', '', str(v).split(',')[0])) if pd.notna(v) and str(v).strip() else 0
     except: return 0
 
+def limpar_doc(v):
+    """Remove tudo que não é número para garantir o match"""
+    return ''.join(filter(str.isdigit, str(v)))
+
 def fmt_moeda(v): 
     try: return f"R$ {int(v):,.0f}".replace(',', '.')
     except: return "R$ 0"
@@ -48,7 +52,7 @@ def fmt_data(d):
     return pd.to_datetime(d).strftime('%d/%m/%Y') if pd.notna(d) and str(d).strip() != '' else "-"
 
 def fmt_doc(v):
-    d = ''.join(filter(str.isdigit, str(v)))
+    d = limpar_doc(v)
     return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}" if len(d)>11 else f"{d[:3]}.{d[3:6]}.{d[6:9]}-{d[9:]}"
 
 # --- 3. CONEXÃO ---
@@ -79,6 +83,9 @@ def carregar_dados_cache():
         if not df_cli.empty:
             df_cli.columns = df_cli.columns.str.strip()
             df_cli['ID_Cliente_CNPJ_CPF'] = df_cli['ID_Cliente_CNPJ_CPF'].astype(str)
+            # Cria coluna chave limpa para cruzamento
+            df_cli['KEY_DOC'] = df_cli['ID_Cliente_CNPJ_CPF'].apply(limpar_doc)
+            
             if 'Total_Compras' in df_cli.columns: df_cli['Total_Compras'] = df_cli['Total_Compras'].apply(limpar_int)
             if 'Data_Ultima_Compra' in df_cli.columns: df_cli['Data_Ultima_Compra'] = pd.to_datetime(df_cli['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
     except: df_cli = pd.DataFrame()
@@ -86,7 +93,9 @@ def carregar_dados_cache():
     # Leads
     try:
         df_leads = pd.DataFrame(ss.worksheet("Novos_Leads").get_all_records()).astype(str)
-        if not df_leads.empty: df_cli = pd.concat([df_cli, df_leads], ignore_index=True)
+        if not df_leads.empty: 
+            df_leads['KEY_DOC'] = df_leads['ID_Cliente_CNPJ_CPF'].apply(limpar_doc)
+            df_cli = pd.concat([df_cli, df_leads], ignore_index=True)
     except: pass
 
     # Interações
@@ -94,24 +103,34 @@ def carregar_dados_cache():
         df_int = pd.DataFrame(ss.worksheet("Interacoes").get_all_records())
         if not df_int.empty:
             if 'Valor_Proposta' in df_int.columns: df_int['Valor_Proposta'] = df_int['Valor_Proposta'].apply(limpar_int)
-            # CORREÇÃO CRÍTICA 1: Garantir que Data_Obj seja sempre date (sem hora)
             if 'Data' in df_int.columns: df_int['Data_Obj'] = pd.to_datetime(df_int['Data'], dayfirst=True, errors='coerce').dt.date
             df_int['CNPJ_Cliente'] = df_int['CNPJ_Cliente'].astype(str)
+            # Cria coluna chave limpa para cruzamento
+            df_int['KEY_DOC'] = df_int['CNPJ_Cliente'].apply(limpar_doc)
             
             if 'Nome_Cliente' not in df_int.columns: df_int['Nome_Cliente'] = None
-            mapa = dict(zip(df_cli['ID_Cliente_CNPJ_CPF'], df_cli['Nome_Fantasia']))
+            
+            # Mapeamento usando a chave limpa
+            mapa = dict(zip(df_cli['KEY_DOC'], df_cli['Nome_Fantasia']))
             mask_n = df_int['Nome_Cliente'].isna() | (df_int['Nome_Cliente'] == "")
-            df_int.loc[mask_n, 'Nome_Cliente'] = df_int.loc[mask_n, 'CNPJ_Cliente'].map(mapa).fillna("Cliente Carteira")
-    except: df_int = pd.DataFrame(columns=['CNPJ_Cliente','Data','Tipo','Resumo','Vendedor','Valor_Proposta','Data_Obj','Nome_Cliente'])
+            df_int.loc[mask_n, 'Nome_Cliente'] = df_int.loc[mask_n, 'KEY_DOC'].map(mapa).fillna("Cliente Carteira")
+    except: df_int = pd.DataFrame(columns=['CNPJ_Cliente','KEY_DOC','Data','Tipo','Resumo','Vendedor','Valor_Proposta','Data_Obj','Nome_Cliente'])
 
     return df_cfg, df_cli, df_int
 
-# --- 5. MOTOR DE CÁLCULO ---
+# --- 5. MOTOR DE CÁLCULO (LÓGICA CORRIGIDA) ---
 def recalcular_status_massa(df_c, df_i):
+    """
+    Define o status baseado na ÚLTIMA interação registrada.
+    Orçamento Enviado -> NEGOCIAÇÃO
+    Ligação/Zap -> FOLLOW-UP
+    Sem interação recente -> ATIVO ou RECUPERAR
+    """
     if df_c.empty: return df_c
     hoje = datetime.now().date()
-    df_c['Status'] = '🟢 ATIVO'
     
+    # 1. Status Base Temporal (ERP)
+    df_c['Status'] = '🟢 ATIVO'
     if 'Data_Ultima_Compra' in df_c.columns:
         df_c['Dias_Sem_Comprar'] = (pd.Timestamp(hoje) - df_c['Data_Ultima_Compra']).dt.days
         df_c.loc[df_c['Dias_Sem_Comprar'] >= 60, 'Status'] = '🔴 RECUPERAR'
@@ -119,44 +138,67 @@ def recalcular_status_massa(df_c, df_i):
     
     if df_i.empty: return df_c
 
-    fechados = df_i[df_i['Tipo'].isin(['Venda Fechada', 'Venda Perdida'])]
-    ids_baixados = set(fechados['Resumo'].apply(extrair_id).dropna())
-    peds_baixados = set(fechados['Resumo'].apply(extrair_pedido_protheus).dropna())
+    # 2. Pega a ÚLTIMA interação de cada cliente (agrupado por documento limpo)
+    # Ordena por data para garantir que a última linha seja a mais recente
+    ultimas_interacoes = df_i.sort_values('Data_Obj', ascending=True).groupby('KEY_DOC').tail(1)
     
-    orcs = df_i[df_i['Tipo'] == 'Orçamento Enviado'].copy()
-    orcs['ID_T'] = orcs['Resumo'].apply(extrair_id)
-    orcs['Ped_T'] = orcs['Resumo'].apply(extrair_pedido_protheus)
+    # Cria dicionário {CNPJ_LIMPO: TIPO_ULTIMA_INTERACAO}
+    mapa_status_interacao = dict(zip(ultimas_interacoes['KEY_DOC'], ultimas_interacoes['Tipo']))
     
-    mask_aberto = ((~orcs['ID_T'].isin(ids_baixados) & orcs['ID_T'].notna()) | 
-                   (~orcs['Ped_T'].isin(peds_baixados) & orcs['Ped_T'].notna()))
-    cnpjs_neg = orcs[mask_aberto]['CNPJ_Cliente'].unique()
-    df_c.loc[df_c['ID_Cliente_CNPJ_CPF'].isin(cnpjs_neg), 'Status'] = '⏳ NEGOCIAÇÃO'
+    def aplicar_status_crm(row):
+        key = row['KEY_DOC'] # Usa chave limpa
+        ultima_acao = mapa_status_interacao.get(key)
+        
+        if not ultima_acao: return row['Status'] # Mantém status ERP se não tiver CRM
+        
+        if ultima_acao == 'Orçamento Enviado':
+            return '⏳ NEGOCIAÇÃO'
+        elif ultima_acao in ['Ligação Realizada', 'WhatsApp Enviado', 'Agendou Visita']:
+            return '⚠️ FOLLOW-UP'
+        elif ultima_acao == 'Venda Perdida':
+            return '👎 VENDA PERDIDA'
+        elif ultima_acao == 'Venda Fechada':
+            return '⭐ VENDA RECENTE'
+        else:
+            return row['Status']
+
+    df_c['Status'] = df_c.apply(aplicar_status_crm, axis=1)
     return df_c
 
 # --- 6. SALVAMENTO ---
 def salvar_nuvem(cnpj, data_input, tipo, resumo, vend, val):
     try:
-        # CORREÇÃO CRÍTICA 2: Garantir que data_input seja .date() (sem hora)
-        if isinstance(data_input, datetime):
-            data_obj = data_input.date()
-        else:
-            data_obj = data_input
+        # Garante data sem hora
+        if isinstance(data_input, datetime): data_obj = data_input.date()
+        else: data_obj = data_input
 
         ss = conectar_google_sheets()
-        # Salva como String no Google
+        # Salva formatado no Google
         ss.worksheet("Interacoes").append_row([str(cnpj), data_obj.strftime('%d/%m/%Y'), tipo, resumo, vend, int(val)])
         
-        # Salva como Date Object na Memória
-        novo = {'CNPJ_Cliente':str(cnpj),'Data_Obj':data_obj,'Tipo':tipo,'Resumo':resumo,'Vendedor':vend,'Valor_Proposta':int(val),'Nome_Cliente':'...'}
+        # Atualiza Localmente
+        cnpj_clean = limpar_doc(cnpj)
+        novo = {
+            'CNPJ_Cliente': str(cnpj),
+            'KEY_DOC': cnpj_clean, # Importante para o match imediato
+            'Data_Obj': data_obj,
+            'Tipo': tipo,
+            'Resumo': resumo,
+            'Vendedor': vend,
+            'Valor_Proposta': int(val),
+            'Nome_Cliente': '...'
+        }
         st.session_state['df_int'] = pd.concat([st.session_state['df_int'], pd.DataFrame([novo])], ignore_index=True)
+        # Recalcula status imediatamente para refletir na tela
         st.session_state['df_cli'] = recalcular_status_massa(st.session_state['df_cli'], st.session_state['df_int'])
         return True
     except Exception as e:
-        st.error(f"Erro ao salvar: {e}")
+        st.error(f"Erro: {e}")
         return False
 
 def salvar_lead(nome, doc, cont, tel, vend, ori, acao, res, val):
     try:
+        doc_clean = limpar_doc(doc)
         ss = conectar_google_sheets()
         ss.worksheet("Novos_Leads").append_row([str(doc), nome.upper(), cont, "NOVO LEAD", tel, "", "", "0", "", "0", "", vend, ori])
         st.cache_data.clear() 
@@ -236,7 +278,6 @@ if tipo_u == "GESTOR":
     mf = vendedores_cfg['Meta_Fat'].sum()
     mc = vendedores_cfg['Meta_Clientes'].sum()
     ma = vendedores_cfg['Meta_Atividades'].sum()
-    
     if not df_int.empty:
         df_mes_gestor = df_int[df_int['Data_Obj'] >= prim_dia]
         lista_vendedores = vendedores_cfg['Usuario'].unique().tolist()
@@ -248,26 +289,13 @@ if tipo_u == "GESTOR":
 else:
     mf, mc, ma = u_data.get('Meta_Fat',0), u_data.get('Meta_Clientes',0), u_data.get('Meta_Atividades',0)
     if not df_int.empty:
-        # CORREÇÃO CRÍTICA 3: Garantia de Comparação
-        # Converte a coluna Data_Obj para date() caso algum datetime tenha escapado
-        # Isso evita o erro de comparação entre Date e Timestamp
-        
-        # Filtro seguro:
         mask_vendedor = df_int['Vendedor'] == u_log
-        
-        # Cria uma máscara de data segura
-        # Se Data_Obj for nulo, considera falso. Se for datetime, pega date.
         def safe_date_compare(d):
             if pd.isna(d): return False
             if isinstance(d, datetime): return d.date() >= prim_dia
             return d >= prim_dia
-
-        # Aplica o filtro de data linha a linha (mais lento, mas 100% seguro contra crash)
-        # Como é apenas para o sidebar do vendedor, o volume é pequeno, então ok.
         mask_data = df_int['Data_Obj'].apply(safe_date_compare)
-        
         df_m = df_int[mask_vendedor & mask_data]
-        
         fat_r = df_m[df_m['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()
         cli_r = df_m[df_m['Tipo']=='Venda Fechada']['CNPJ_Cliente'].nunique()
         ativ_r = len(df_m[df_m['Tipo'].isin(['Ligação Realizada','WhatsApp Enviado','Agendou Visita'])])
@@ -320,15 +348,12 @@ if tipo_u == "GESTOR":
         sel_v = c3.multiselect("Vendedores", lista_vendedores_completa)
     
     if not minhas_int.empty:
-        # Filtro de Data Seguro para Gestor também
         def safe_date_filter(d):
             if pd.isna(d): return False
             if isinstance(d, datetime): d = d.date()
             return di <= d <= df
-
         mask_data_gestor = minhas_int['Data_Obj'].apply(safe_date_filter)
         dff = minhas_int[mask_data_gestor]
-        
         if sel_v: dff = dff[dff['Vendedor'].isin(sel_v)]
     else: dff = pd.DataFrame()
         
@@ -336,7 +361,6 @@ if tipo_u == "GESTOR":
         resols = set(dff[dff['Tipo'].isin(['Venda Fechada','Venda Perdida'])]['Resumo'])
         ids_res = set([extrair_id(x) for x in resols if extrair_id(x)])
         peds_res = set([extrair_pedido_protheus(x) for x in resols if extrair_pedido_protheus(x)])
-        
         mesa = 0
         for _, row in dff[dff['Tipo']=='Orçamento Enviado'].iterrows():
             if not ((extrair_id(row['Resumo']) in ids_res) or (extrair_pedido_protheus(row['Resumo']) in peds_res)):
@@ -368,11 +392,14 @@ else:
         st.markdown("### 🔍 Filtros")
         busca = st.text_input("Buscar", placeholder="Nome ou CNPJ...")
         status_padrao = ['⏳ NEGOCIAÇÃO', '⚠️ FOLLOW-UP']
-        filtro_status = st.multiselect("Status", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '🟢 ATIVO'], default=status_padrao)
+        filtro_status = st.multiselect("Status", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '🟢 ATIVO', '⭐ VENDA RECENTE'], default=status_padrao)
         
+        # Filtro de Busca
         if busca:
             busca = busca.upper()
-            lista_final = meus_cli[meus_cli['Nome_Fantasia'].str.upper().str.contains(busca, na=False) | meus_cli['ID_Cliente_CNPJ_CPF'].astype(str).str.contains(busca, na=False)]
+            # Usa a chave limpa para busca de CNPJ também
+            mask_busca = (meus_cli['Nome_Fantasia'].str.upper().str.contains(busca, na=False)) | (meus_cli['KEY_DOC'].str.contains(limpar_doc(busca), na=False))
+            lista_final = meus_cli[mask_busca]
         else:
             lista_final = meus_cli[meus_cli['Status'].isin(filtro_status)].sort_values('Status')
 
@@ -398,7 +425,10 @@ else:
                 d2.markdown(f"**📅** {fmt_data(c_dados.get('Data_Ultima_Compra', '-'))}")
                 st.divider()
                 
-                c_ints = minhas_int[minhas_int['CNPJ_Cliente'] == str(cid_selecionado)].sort_values('Data_Obj', ascending=False)
+                # Para mostrar o histórico, cruzamos com KEY_DOC
+                key_selecionada = limpar_doc(cid_selecionado)
+                c_ints = minhas_int[minhas_int['KEY_DOC'] == key_selecionada].sort_values('Data_Obj', ascending=False)
+                
                 tab1, tab2, tab3 = st.tabs(["📜 Hist", "💰 Abertas", "📝 Nova"])
                 
                 with tab1:
@@ -415,6 +445,7 @@ else:
                     abertas = []
                     for _, row in c_ints[c_ints['Tipo'] == 'Orçamento Enviado'].iterrows():
                         pid, ped = extrair_id(row['Resumo']), extrair_pedido_protheus(row['Resumo'])
+                        # Mostra se NÃO estiver fechado OU se não tiver ID (manual sem ID ainda é aberto)
                         if not ((pid and pid in ids_res) or (ped and ped in peds_res)): abertas.append(row)
                     
                     if abertas:
@@ -424,9 +455,9 @@ else:
                                 ca.markdown(f"**{fmt_data(r['Data_Obj'])}** | {fmt_moeda(r['Valor_Proposta'])}")
                                 ca.caption(r['Resumo'])
                                 if cb.button("✅", key=f"win_{i}"):
-                                    if salvar_nuvem(cid_selecionado, datetime.now().date(), "Venda Fechada", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
+                                    if salvar_nuvem(cid_selecionado, datetime.now(), "Venda Fechada", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
                                 if cc.button("❌", key=f"loss_{i}"):
-                                    if salvar_nuvem(cid_selecionado, datetime.now().date(), "Venda Perdida", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
+                                    if salvar_nuvem(cid_selecionado, datetime.now(), "Venda Perdida", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
                     else: st.info("Nada pendente.")
 
                 with tab3:
@@ -435,6 +466,6 @@ else:
                         vlr = st.number_input("Valor (R$) - Apenas Orçamento", step=1)
                         obs = st.text_area("Obs")
                         if st.form_submit_button("💾 Salvar"):
-                            if salvar_nuvem(cid_selecionado, datetime.now().date(), act, obs, u_log, vlr if act == "Orçamento Enviado" else 0):
+                            if salvar_nuvem(cid_selecionado, datetime.now(), act, obs, u_log, vlr if act == "Orçamento Enviado" else 0):
                                 st.success("Salvo!"); time.sleep(1); st.rerun()
         else: st.info("👈 Selecione um cliente.")
