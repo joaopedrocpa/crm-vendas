@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 22.0 Turbo", layout="wide")
+st.set_page_config(page_title="CRM Master 22.1 Turbo", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
 # --- CSS (VISUAL DARK PREMIUM) ---
@@ -128,7 +128,7 @@ def carregar_dados_estaticos():
             
     return df_config, df_protheus
 
-# 2. Interações e Leads (Dinâmico, cache médio, atualizado manualmente ou no save)
+# 2. Interações e Leads (Dinâmico, cache médio)
 @st.cache_data(ttl=600) 
 def carregar_dados_dinamicos():
     spreadsheet = conectar_google_sheets()
@@ -150,20 +150,21 @@ def carregar_dados_dinamicos():
                 df_interacoes['Valor_Proposta'] = df_interacoes['Valor_Proposta'].apply(limpar_valor_inteiro)
             if 'Data' in df_interacoes.columns:
                 df_interacoes['Data_Obj'] = pd.to_datetime(df_interacoes['Data'], dayfirst=True, errors='coerce').dt.date
-            # Mapeamento de nomes será feito no merge final para economizar tempo aqui
+            
+            # CORREÇÃO CRÍTICA: Garantir que Nome_Cliente exista
+            if 'Nome_Cliente' not in df_interacoes.columns:
+                df_interacoes['Nome_Cliente'] = None
     except:
-        df_interacoes = pd.DataFrame(columns=['CNPJ_Cliente', 'Data', 'Tipo', 'Resumo', 'Vendedor', 'Valor_Proposta'])
+        df_interacoes = pd.DataFrame(columns=['CNPJ_Cliente', 'Data', 'Tipo', 'Resumo', 'Vendedor', 'Valor_Proposta', 'Nome_Cliente'])
         
     return df_leads, df_interacoes
 
 # --- SALVAMENTO LOCAL (O SEGREDO DA VELOCIDADE) ---
 def atualizar_estado_local(nova_linha_dict):
-    """Insere o dado na memória RAM para não precisar recarregar o Google Sheets inteiro"""
+    """Insere o dado na memória RAM"""
     if 'dados_interacoes' in st.session_state:
         df_atual = st.session_state['dados_interacoes']
-        # Cria DataFrame de 1 linha
         novo_df = pd.DataFrame([nova_linha_dict])
-        # Concatena
         st.session_state['dados_interacoes'] = pd.concat([df_atual, novo_df], ignore_index=True)
 
 def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_inteiro):
@@ -187,16 +188,14 @@ def salvar_interacao_nuvem(cnpj, data_obj, tipo, resumo, vendedor, valor_inteiro
         nova_linha = {
             'CNPJ_Cliente': str(cnpj),
             'Data': data_str,
-            'Data_Obj': data_obj, # Importante para filtros
+            'Data_Obj': data_obj, 
             'Tipo': tipo,
             'Resumo': resumo_final,
             'Vendedor': vendedor,
             'Valor_Proposta': valor_save,
-            'Nome_Cliente': "Atualizando..." # Não buscamos o nome agora para ser rápido
+            'Nome_Cliente': "Atualizando..." 
         }
         atualizar_estado_local(nova_linha)
-        
-        # NÃO LIMPAMOS O CACHE AQUI! ISSO QUE DAVA LENTIDÃO.
         return True
     except Exception as e:
         st.error(f"Erro Salvar: {e}")
@@ -209,10 +208,8 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
         nova_linha_lead = [str(cnpj), nome.upper(), contato, "NOVO LEAD", telefone, "", "", "0", "", "0", "", vendedor, origem]
         sheet_leads.append_row(nova_linha_lead)
         
-        # Atualiza Leads na RAM (Simplificado)
-        st.cache_data.clear() # Leads precisa limpar cache pois afeta lista de clientes
+        st.cache_data.clear() # Limpa cache para leads novos aparecerem
         
-        # Salva Interação
         sheet_interacoes = spreadsheet.worksheet("Interacoes")
         data_str = datetime.now().strftime('%d/%m/%Y')
         valor_save = int(valor_inteiro)
@@ -227,7 +224,6 @@ def salvar_novo_lead_completo(cnpj, nome, contato, telefone, vendedor, origem, p
 
 # --- IMPORTAÇÃO PROTHEUS ---
 def processar_arquivo_protheus(uploaded_file, df_existente):
-    # Lógica mantida, mas forçando limpeza de cache pois é uma carga massiva
     try:
         df_import = pd.read_excel(uploaded_file)
         cols_necessarias = ['DATA', 'CNPJ', 'VENDEDOR', 'VALOR', 'PEDIDO', 'STATUS']
@@ -279,7 +275,7 @@ def processar_arquivo_protheus(uploaded_file, df_existente):
             
         if novas_linhas:
             sheet.append_rows(novas_linhas)
-            st.cache_data.clear() # Importação em massa exige limpeza total
+            st.cache_data.clear() 
             return True, f"Processado: {contador_novos} novos."
         else: return True, "Tudo sincronizado."
     except Exception as e: return False, f"Erro: {e}"
@@ -315,38 +311,41 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 # --- APP PRINCIPAL ---
 try:
     if URL_LOGO: st.sidebar.image(URL_LOGO, width=150)
-    st.sidebar.title("CRM 22.0 Turbo")
+    st.sidebar.title("CRM 22.1 Turbo")
     
-    # BOTÃO DE RECARGA MANUAL (Para limpar cache se precisar)
     if st.sidebar.button("🔄 Atualizar Dados"):
         st.cache_data.clear()
         st.rerun()
     
-    # 1. Carregamento Otimizado (Cache Longo)
+    # 1. Carregamento Otimizado
     df_config, df_protheus = carregar_dados_estaticos()
     
-    # 2. Carregamento Dinâmico (Cache Curto ou Sessão)
-    # Se já temos interações na sessão, usamos ela (velocidade), senão carregamos
+    # 2. Carregamento Dinâmico
     if 'dados_interacoes' not in st.session_state:
         df_leads_raw, df_inter_raw = carregar_dados_dinamicos()
         st.session_state['dados_leads'] = df_leads_raw
         st.session_state['dados_interacoes'] = df_inter_raw
     
-    # Usamos sempre a sessão para manipulação
     df_leads = st.session_state['dados_leads']
     df_interacoes = st.session_state['dados_interacoes']
 
-    # Merge de Clientes (Protheus + Leads) - Rápido em memória
+    # Merge de Clientes
     if not df_leads.empty:
         df_clientes = pd.concat([df_protheus, df_leads], ignore_index=True)
     else: df_clientes = df_protheus
     
-    # Mapeamento de Nomes nas Interações (Feito aqui em RAM para ser rápido)
+    # --- CORREÇÃO DO ERRO CRÍTICO ---
+    # Garantir que a coluna Nome_Cliente existe antes de mapear
+    if not df_interacoes.empty:
+        if 'Nome_Cliente' not in df_interacoes.columns:
+            df_interacoes['Nome_Cliente'] = None
+
+    # Mapeamento de Nomes
     if not df_clientes.empty and not df_interacoes.empty:
         mapa = dict(zip(df_clientes['ID_Cliente_CNPJ_CPF'].astype(str), df_clientes['Nome_Fantasia']))
         df_interacoes['CNPJ_Cliente'] = df_interacoes['CNPJ_Cliente'].astype(str)
-        # Só preenche onde está faltando ou "Atualizando..."
         mask_nome = (df_interacoes['Nome_Cliente'].isna()) | (df_interacoes['Nome_Cliente'] == "Atualizando...")
+        # FillNa garante que não dê erro se o cliente não for encontrado
         df_interacoes.loc[mask_nome, 'Nome_Cliente'] = df_interacoes.loc[mask_nome, 'CNPJ_Cliente'].map(mapa).fillna("Cliente Carteira")
 
     if not df_config.empty:
