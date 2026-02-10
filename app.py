@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 24.1", layout="wide")
+st.set_page_config(page_title="CRM Master 24.2", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
 # --- CSS (Visual Dark & Scroll) ---
@@ -105,10 +105,9 @@ def carregar_dados_cache():
 
     return df_cfg, df_cli, df_int
 
-# --- 5. MOTOR DE CÁLCULO VETORIZADO ---
+# --- 5. MOTOR DE CÁLCULO ---
 def recalcular_status_massa(df_c, df_i):
     if df_c.empty: return df_c
-    
     hoje = datetime.now().date()
     df_c['Status'] = '🟢 ATIVO'
     
@@ -130,17 +129,14 @@ def recalcular_status_massa(df_c, df_i):
     mask_aberto = ((~orcs['ID_T'].isin(ids_baixados) & orcs['ID_T'].notna()) | 
                    (~orcs['Ped_T'].isin(peds_baixados) & orcs['Ped_T'].notna()))
     cnpjs_neg = orcs[mask_aberto]['CNPJ_Cliente'].unique()
-    
     df_c.loc[df_c['ID_Cliente_CNPJ_CPF'].isin(cnpjs_neg), 'Status'] = '⏳ NEGOCIAÇÃO'
-    
     return df_c
 
-# --- 6. FUNÇÕES DE SALVAMENTO ---
+# --- 6. FUNÇÕES SALVAMENTO ---
 def salvar_nuvem(cnpj, data, tipo, resumo, vend, val):
     try:
         ss = conectar_google_sheets()
         ss.worksheet("Interacoes").append_row([str(cnpj), data.strftime('%d/%m/%Y'), tipo, resumo, vend, int(val)])
-        
         novo = {'CNPJ_Cliente':str(cnpj),'Data_Obj':data,'Tipo':tipo,'Resumo':resumo,'Vendedor':vend,'Valor_Proposta':int(val),'Nome_Cliente':'...'}
         st.session_state['df_int'] = pd.concat([st.session_state['df_int'], pd.DataFrame([novo])], ignore_index=True)
         st.session_state['df_cli'] = recalcular_status_massa(st.session_state['df_cli'], st.session_state['df_int'])
@@ -164,7 +160,6 @@ def proc_import(file, df_old):
         if not {'DATA','CNPJ','VENDEDOR','VALOR','PEDIDO','STATUS'}.issubset(df.columns): return False, "Colunas Erradas"
         peds_ex = set(df_old['Resumo'].apply(extrair_pedido_protheus).dropna()) if not df_old.empty else set()
         novos = []
-        
         for _, r in df.iterrows():
             pid = str(r['PEDIDO']).strip()
             if pid not in peds_ex:
@@ -174,7 +169,6 @@ def proc_import(file, df_old):
                 try: dt = pd.to_datetime(r['DATA']).strftime('%d/%m/%Y')
                 except: dt = datetime.now().strftime('%d/%m/%Y')
                 novos.append([''.join(filter(str.isdigit, str(r['CNPJ']))), dt, tipo, res, str(r['VENDEDOR']).upper().strip(), limpar_int(r['VALOR'])])
-        
         if novos: 
             conectar_google_sheets().worksheet("Interacoes").append_rows(novos)
             st.cache_data.clear()
@@ -191,12 +185,11 @@ if 'df_cli' not in st.session_state:
 
 df_cfg = st.session_state['df_cfg']
 
-# --- TELA DE LOGIN ---
+# LOGIN
 if not st.session_state['logado']:
     if URL_LOGO: st.sidebar.image(URL_LOGO, width=150)
     st.sidebar.title("CRM Login")
-    if df_cfg.empty:
-        st.error("Erro ao carregar configurações."); st.stop()
+    if df_cfg.empty: st.error("Erro Config"); st.stop()
     usrs = sorted(df_cfg['Usuario'].unique())
     u = st.sidebar.selectbox("Usuário", usrs)
     p = st.sidebar.text_input("Senha", type="password")
@@ -207,11 +200,10 @@ if not st.session_state['logado']:
         else: st.error("Senha Incorreta")
     st.stop()
 
-# --- DADOS DO USUÁRIO LOGADO ---
+# ESTADO USUÁRIO
 u_log = st.session_state['u_atual']
 df_cli = st.session_state['df_cli']
 df_int = st.session_state['df_int']
-
 u_data = df_cfg[df_cfg['Usuario']==u_log].iloc[0]
 tipo_u = str(u_data['Tipo']).upper().strip()
 carts = [x.strip() for x in str(u_data['Carteira_Alvo']).split(',')]
@@ -224,16 +216,39 @@ if st.sidebar.button("🔄 Atualizar"): st.cache_data.clear(); st.rerun()
 if st.sidebar.button("Sair"): st.session_state['logado'] = False; st.rerun()
 st.sidebar.divider()
 
-# Metas
+# --- CÁLCULO DE METAS E REALIZADO ---
 prim_dia = datetime.now().date().replace(day=1)
-if not df_int.empty:
-    df_m = df_int[(df_int['Vendedor']==u_log) & (df_int['Data_Obj']>=prim_dia)]
-    fat_r = df_m[df_m['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()
-    cli_r = df_m[df_m['Tipo']=='Venda Fechada']['CNPJ_Cliente'].nunique()
-    ativ_r = len(df_m[df_m['Tipo'].isin(['Ligação Realizada','WhatsApp Enviado','Agendou Visita'])])
-else: fat_r=0; cli_r=0; ativ_r=0
 
-mf, mc, ma = u_data.get('Meta_Fat',0), u_data.get('Meta_Clientes',0), u_data.get('Meta_Atividades',0)
+# Definição das Metas (Lógica da Soma para Gestor)
+if tipo_u == "GESTOR":
+    # Soma todas as metas de quem é VENDEDOR na planilha Config
+    vendedores_cfg = df_cfg[df_cfg['Tipo'] == 'VENDEDOR']
+    mf = vendedores_cfg['Meta_Fat'].sum()
+    mc = vendedores_cfg['Meta_Clientes'].sum()
+    ma = vendedores_cfg['Meta_Atividades'].sum()
+    
+    # Realizado do Gestor = Soma de toda a equipe (filtrado por quem é vendedor)
+    if not df_int.empty:
+        # Filtra interações do mês
+        df_mes_gestor = df_int[df_int['Data_Obj'] >= prim_dia]
+        # Opcional: Filtrar apenas vendedores cadastrados, caso tenha gente antiga
+        lista_vendedores = vendedores_cfg['Usuario'].unique().tolist()
+        df_mes_gestor = df_mes_gestor[df_mes_gestor['Vendedor'].isin(lista_vendedores)]
+        
+        fat_r = df_mes_gestor[df_mes_gestor['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()
+        cli_r = df_mes_gestor[df_mes_gestor['Tipo']=='Venda Fechada']['CNPJ_Cliente'].nunique()
+        ativ_r = len(df_mes_gestor[df_mes_gestor['Tipo'].isin(['Ligação Realizada','WhatsApp Enviado','Agendou Visita'])])
+    else: fat_r=0; cli_r=0; ativ_r=0
+
+else:
+    # Vendedor vê apenas a sua
+    mf, mc, ma = u_data.get('Meta_Fat',0), u_data.get('Meta_Clientes',0), u_data.get('Meta_Atividades',0)
+    if not df_int.empty:
+        df_m = df_int[(df_int['Vendedor']==u_log) & (df_int['Data_Obj']>=prim_dia)]
+        fat_r = df_m[df_m['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()
+        cli_r = df_m[df_m['Tipo']=='Venda Fechada']['CNPJ_Cliente'].nunique()
+        ativ_r = len(df_m[df_m['Tipo'].isin(['Ligação Realizada','WhatsApp Enviado','Agendou Visita'])])
+    else: fat_r=0; cli_r=0; ativ_r=0
 
 st.sidebar.markdown("### 🎯 Metas Mês")
 st.sidebar.caption(f"💰 Fat: {fmt_moeda(fat_r)} / {fmt_moeda(mf)}")
@@ -263,9 +278,13 @@ if "TODOS" in carts or tipo_u == "VENDEDOR":
         if st.button("Salvar Lead"):
             if salvar_lead(n,d,c,t,u_log,o,a,r,v): st.success("Salvo!"); time.sleep(1); st.rerun()
 
-# --- FILTRAGEM ---
-meus_cli = df_cli if "TODOS" in carts else df_cli[df_cli['Ultimo_Vendedor'].isin(carts)]
-minhas_int = df_int if "TODOS" in carts else df_int[df_int['Vendedor'].isin(carts)]
+# --- FILTRAGEM DADOS ---
+if "TODOS" in carts:
+    meus_cli = df_cli
+    minhas_int = df_int # Gestor vê tudo
+else:
+    meus_cli = df_cli[df_cli['Ultimo_Vendedor'].isin(carts)]
+    minhas_int = df_int[df_int['Vendedor'].isin(carts)]
 
 # --- VIEW GESTOR ---
 if tipo_u == "GESTOR":
@@ -274,13 +293,20 @@ if tipo_u == "GESTOR":
         c1,c2,c3 = st.columns(3)
         di = c1.date_input("De", value=datetime.now()-timedelta(days=30))
         df = c2.date_input("Até", value=datetime.now())
-        sel_v = c3.multiselect("Vendedores", minhas_int['Vendedor'].unique())
+        
+        # CORREÇÃO: Dropdown pega todos os vendedores cadastrados no CONFIG, não só quem vendeu
+        lista_vendedores_completa = sorted(df_cfg[df_cfg['Tipo'] == 'VENDEDOR']['Usuario'].unique())
+        sel_v = c3.multiselect("Vendedores", lista_vendedores_completa)
     
+    # Aplica filtros APÓS carregar tudo
     if not minhas_int.empty:
         msk = (minhas_int['Data_Obj']>=di) & (minhas_int['Data_Obj']<=df)
         if sel_v: msk &= minhas_int['Vendedor'].isin(sel_v)
         dff = minhas_int[msk]
+    else: dff = pd.DataFrame()
         
+    if not dff.empty:
+        # Pipeline Logic
         resols = set(dff[dff['Tipo'].isin(['Venda Fechada','Venda Perdida'])]['Resumo'])
         ids_res = set([extrair_id(x) for x in resols if extrair_id(x)])
         peds_res = set([extrair_pedido_protheus(x) for x in resols if extrair_pedido_protheus(x)])
@@ -295,12 +321,20 @@ if tipo_u == "GESTOR":
         k2.metric("Na Mesa", fmt_moeda(mesa))
         k3.metric("Fechado", fmt_moeda(dff[dff['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()))
         
-        if not dff.empty:
-            agg = dff.groupby('Vendedor').agg(
-                Fat=('Valor_Proposta', lambda x: x[dff.loc[x.index,'Tipo']=='Venda Fechada'].sum()),
-                Cli=('CNPJ_Cliente', lambda x: x[dff.loc[x.index,'Tipo']=='Venda Fechada'].nunique())
-            ).reset_index()
-            st.dataframe(agg, use_container_width=True)
+        agg = dff.groupby('Vendedor').agg(
+            Fat=('Valor_Proposta', lambda x: x[dff.loc[x.index,'Tipo']=='Venda Fechada'].sum()),
+            Cli=('CNPJ_Cliente', lambda x: x[dff.loc[x.index,'Tipo']=='Venda Fechada'].nunique())
+        ).reset_index()
+        
+        # Merge com Metas para Ranking
+        df_metas_merge = df_cfg[['Usuario', 'Meta_Fat']].rename(columns={'Usuario':'Vendedor'})
+        agg = pd.merge(agg, df_metas_merge, on='Vendedor', how='left').fillna(0)
+        agg['% Meta'] = agg.apply(lambda x: f"{x['Fat']/x['Meta_Fat']*100:.0f}%" if x['Meta_Fat']>0 else "-", axis=1)
+        agg['Fat'] = agg['Fat'].apply(fmt_moeda)
+        
+        st.dataframe(agg, use_container_width=True)
+    else:
+        st.info("Sem dados para o período/vendedores selecionados.")
 
 # --- VIEW VENDEDOR ---
 else:
@@ -309,7 +343,7 @@ else:
     
     with col_list:
         st.markdown("### 🔍 Filtros")
-        busca = st.text_input("Buscar por Nome ou CNPJ", placeholder="Digite para filtrar...")
+        busca = st.text_input("Buscar", placeholder="Nome ou CNPJ...")
         status_padrao = ['⏳ NEGOCIAÇÃO', '⚠️ FOLLOW-UP']
         filtro_status = st.multiselect("Status", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '🟢 ATIVO'], default=status_padrao)
         
@@ -319,18 +353,12 @@ else:
         else:
             lista_final = meus_cli[meus_cli['Status'].isin(filtro_status)].sort_values('Status')
 
-        st.caption(f"{len(lista_final)} clientes encontrados.")
-
+        st.caption(f"{len(lista_final)} clientes.")
         cid_selecionado = None
         if not lista_final.empty:
             with st.container(height=600):
-                cid_selecionado = st.radio(
-                    "Selecione o Cliente:",
-                    lista_final.head(100)['ID_Cliente_CNPJ_CPF'].tolist(),
-                    format_func=lambda x: f"[{lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Status'].values[0]}] {lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}"
-                )
-        else:
-            st.info("Nenhum cliente com esses filtros.")
+                cid_selecionado = st.radio("Selecione:", lista_final.head(100)['ID_Cliente_CNPJ_CPF'].tolist(), format_func=lambda x: f"[{lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Status'].values[0]}] {lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}")
+        else: st.info("Nenhum cliente.")
 
     with col_det:
         if cid_selecionado:
@@ -339,17 +367,16 @@ else:
                 st.subheader(c_dados['Nome_Fantasia'])
                 st.caption(f"CNPJ: {fmt_doc(cid_selecionado)}")
                 d1, d2 = st.columns(2)
-                d1.markdown(f"**👤 Cont:** {c_dados.get('Contato', c_dados.get('Nome_Contato', '-'))}")
-                d1.markdown(f"**📞 Tel:** {c_dados.get('Telefone_Contato1', '-')}")
-                d1.markdown(f"**📍 Loc:** {c_dados.get('Cidade','-')}/{c_dados.get('UF','-')}")
-                d2.markdown(f"**👔 Cart:** {c_dados.get('Ultimo_Vendedor','-')}")
-                d2.markdown(f"**💰 Tot:** {fmt_moeda(c_dados.get('Total_Compras', 0))}")
-                d2.markdown(f"**📅 Últ:** {fmt_data(c_dados.get('Data_Ultima_Compra', '-'))}")
-                
+                d1.markdown(f"**👤** {c_dados.get('Contato', '-')}")
+                d1.markdown(f"**📞** {c_dados.get('Telefone_Contato1', '-')}")
+                d1.markdown(f"**📍** {c_dados.get('Cidade','-')}/{c_dados.get('UF','-')}")
+                d2.markdown(f"**👔** {c_dados.get('Ultimo_Vendedor','-')}")
+                d2.markdown(f"**💰** {fmt_moeda(c_dados.get('Total_Compras', 0))}")
+                d2.markdown(f"**📅** {fmt_data(c_dados.get('Data_Ultima_Compra', '-'))}")
                 st.divider()
-                c_ints = minhas_int[minhas_int['CNPJ_Cliente'] == str(cid_selecionado)].sort_values('Data_Obj', ascending=False)
                 
-                tab1, tab2, tab3 = st.tabs(["📜 Histórico", "💰 Propostas Abertas", "📝 Nova Ação"])
+                c_ints = minhas_int[minhas_int['CNPJ_Cliente'] == str(cid_selecionado)].sort_values('Data_Obj', ascending=False)
+                tab1, tab2, tab3 = st.tabs(["📜 Hist", "💰 Abertas", "📝 Nova"])
                 
                 with tab1:
                     if not c_ints.empty:
@@ -357,13 +384,11 @@ else:
                         view['Valor_Proposta'] = view['Valor_Proposta'].apply(fmt_moeda)
                         view['Data_Obj'] = view['Data_Obj'].apply(fmt_data)
                         st.dataframe(view, hide_index=True, use_container_width=True)
-                    else: st.info("Sem histórico.")
                 
                 with tab2:
                     resols_cli = set(c_ints[c_ints['Tipo'].isin(['Venda Fechada', 'Venda Perdida'])]['Resumo'])
                     ids_res = set([extrair_id(x) for x in resols_cli if extrair_id(x)])
                     peds_res = set([extrair_pedido_protheus(x) for x in resols_cli if extrair_pedido_protheus(x)])
-                    
                     abertas = []
                     for _, row in c_ints[c_ints['Tipo'] == 'Orçamento Enviado'].iterrows():
                         pid, ped = extrair_id(row['Resumo']), extrair_pedido_protheus(row['Resumo'])
@@ -379,22 +404,14 @@ else:
                                     if salvar_nuvem(cid_selecionado, datetime.now(), "Venda Fechada", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
                                 if cc.button("❌", key=f"loss_{i}"):
                                     if salvar_nuvem(cid_selecionado, datetime.now(), "Venda Perdida", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
-                    else: st.info("Nenhuma proposta pendente.")
+                    else: st.info("Nada pendente.")
 
                 with tab3:
                     with st.form(key="nova_acao_form"):
                         act = st.selectbox("Ação", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
-                        # --- CORREÇÃO SOLICITADA: CAIXA FIXA ---
-                        vlr = st.number_input("Valor (R$) - Apenas se Orçamento", step=1)
-                        obs = st.text_area("Observações")
-                        submit = st.form_submit_button("💾 Salvar Interação")
-                        
-                        if submit:
-                            # Ignora valor se não for Orçamento
-                            valor_final = vlr if act == "Orçamento Enviado" else 0
-                            if salvar_nuvem(cid_selecionado, datetime.now(), act, obs, u_log, valor_final):
-                                st.success("Salvo!")
-                                time.sleep(1)
-                                st.rerun()
-        else:
-            st.info("👈 Selecione um cliente.")
+                        vlr = st.number_input("Valor (R$) - Apenas Orçamento", step=1)
+                        obs = st.text_area("Obs")
+                        if st.form_submit_button("💾 Salvar"):
+                            if salvar_nuvem(cid_selecionado, datetime.now(), act, obs, u_log, vlr if act == "Orçamento Enviado" else 0):
+                                st.success("Salvo!"); time.sleep(1); st.rerun()
+        else: st.info("👈 Selecione um cliente.")
