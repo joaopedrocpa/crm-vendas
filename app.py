@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 24.7", layout="wide")
+st.set_page_config(page_title="CRM Master 24.8", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
 # --- CSS ---
@@ -75,6 +75,10 @@ def carregar_dados_cache():
         df_cfg = pd.DataFrame(ss.worksheet("Config_Equipe").get_all_records()).astype(str)
         for c in ['Meta_Fat','Meta_Clientes','Meta_Atividades']: 
             if c in df_cfg.columns: df_cfg[c] = df_cfg[c].apply(limpar_int)
+        
+        # NORMALIZAÇÃO DE TEXTO (Remove espaços e deixa Maiúsculo)
+        if 'Usuario' in df_cfg.columns: 
+            df_cfg['Usuario'] = df_cfg['Usuario'].str.strip().str.upper()
     except: df_cfg = pd.DataFrame()
 
     # Clientes
@@ -84,6 +88,11 @@ def carregar_dados_cache():
             df_cli.columns = df_cli.columns.str.strip()
             df_cli['ID_Cliente_CNPJ_CPF'] = df_cli['ID_Cliente_CNPJ_CPF'].astype(str)
             df_cli['KEY_DOC'] = df_cli['ID_Cliente_CNPJ_CPF'].apply(limpar_doc)
+            
+            # NORMALIZAÇÃO DE VENDEDOR (Crucial para o seu erro)
+            if 'Ultimo_Vendedor' in df_cli.columns:
+                df_cli['Ultimo_Vendedor'] = df_cli['Ultimo_Vendedor'].astype(str).str.strip().str.upper()
+
             if 'Total_Compras' in df_cli.columns: df_cli['Total_Compras'] = df_cli['Total_Compras'].apply(limpar_int)
             if 'Data_Ultima_Compra' in df_cli.columns: df_cli['Data_Ultima_Compra'] = pd.to_datetime(df_cli['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
     except: df_cli = pd.DataFrame()
@@ -93,6 +102,8 @@ def carregar_dados_cache():
         df_leads = pd.DataFrame(ss.worksheet("Novos_Leads").get_all_records()).astype(str)
         if not df_leads.empty: 
             df_leads['KEY_DOC'] = df_leads['ID_Cliente_CNPJ_CPF'].apply(limpar_doc)
+            # Normaliza Vendedor no Lead
+            if 'Vendedor' in df_leads.columns: df_leads['Vendedor'] = df_leads['Vendedor'].str.strip().str.upper()
             df_cli = pd.concat([df_cli, df_leads], ignore_index=True)
     except: pass
 
@@ -104,6 +115,9 @@ def carregar_dados_cache():
             if 'Data' in df_int.columns: df_int['Data_Obj'] = pd.to_datetime(df_int['Data'], dayfirst=True, errors='coerce').dt.date
             df_int['CNPJ_Cliente'] = df_int['CNPJ_Cliente'].astype(str)
             df_int['KEY_DOC'] = df_int['CNPJ_Cliente'].apply(limpar_doc)
+            
+            # Normaliza Vendedor nas Interações
+            if 'Vendedor' in df_int.columns: df_int['Vendedor'] = df_int['Vendedor'].astype(str).str.strip().str.upper()
             
             if 'Nome_Cliente' not in df_int.columns: df_int['Nome_Cliente'] = None
             mapa = dict(zip(df_cli['KEY_DOC'], df_cli['Nome_Fantasia']))
@@ -154,13 +168,14 @@ def salvar_nuvem(cnpj, data_input, tipo, resumo, vend, val):
             resumo_final = f"{id_prop} {resumo}"
 
         ss = conectar_google_sheets()
-        ss.worksheet("Interacoes").append_row([str(cnpj), data_obj.strftime('%d/%m/%Y'), tipo, resumo_final, vend, int(val)])
+        # Salva o Vendedor normalizado (Maiúsculo, sem espaço)
+        vend_clean = str(vend).strip().upper()
+        ss.worksheet("Interacoes").append_row([str(cnpj), data_obj.strftime('%d/%m/%Y'), tipo, resumo_final, vend_clean, int(val)])
         
         cnpj_clean = limpar_doc(cnpj)
-        # O Nome_Cliente fica '...' aqui para ser rápido, mas o Gestor corrige na visualização
         novo = {
             'CNPJ_Cliente': str(cnpj), 'KEY_DOC': cnpj_clean, 'Data_Obj': data_obj,
-            'Tipo': tipo, 'Resumo': resumo_final, 'Vendedor': vend, 'Valor_Proposta': int(val), 'Nome_Cliente': '...'
+            'Tipo': tipo, 'Resumo': resumo_final, 'Vendedor': vend_clean, 'Valor_Proposta': int(val), 'Nome_Cliente': '...'
         }
         st.session_state['df_int'] = pd.concat([st.session_state['df_int'], pd.DataFrame([novo])], ignore_index=True)
         st.session_state['df_cli'] = recalcular_status_massa(st.session_state['df_cli'], st.session_state['df_int'])
@@ -172,12 +187,13 @@ def salvar_nuvem(cnpj, data_input, tipo, resumo, vend, val):
 def salvar_lead(nome, doc, cont, tel, vend, ori, acao, res, val):
     try:
         ss = conectar_google_sheets()
-        ss.worksheet("Novos_Leads").append_row([str(doc), nome.upper(), cont, "NOVO LEAD", tel, "", "", "0", "", "0", "", vend, ori])
+        vend_clean = str(vend).strip().upper()
+        ss.worksheet("Novos_Leads").append_row([str(doc), nome.upper(), cont, "NOVO LEAD", tel, "", "", "0", "", "0", "", vend_clean, ori])
         st.cache_data.clear() 
         if acao:
             id_p = f"#{gerar_id_proposta()} " if acao == "Orçamento Enviado" else ""
             resumo_final = f"{id_p}{res}"
-            ss.worksheet("Interacoes").append_row([str(doc), datetime.now().strftime('%d/%m/%Y'), acao, resumo_final, vend, int(val)])
+            ss.worksheet("Interacoes").append_row([str(doc), datetime.now().strftime('%d/%m/%Y'), acao, resumo_final, vend_clean, int(val)])
         return True
     except: return False
 
@@ -195,7 +211,9 @@ def proc_import(file, df_old):
                 res = f"{'#'+gerar_id_proposta()+' ' if tipo=='Orçamento Enviado' else ''}[PROTHEUS] Pedido: {pid} | {stt}"
                 try: dt = pd.to_datetime(r['DATA']).strftime('%d/%m/%Y')
                 except: dt = datetime.now().strftime('%d/%m/%Y')
-                novos.append([''.join(filter(str.isdigit, str(r['CNPJ']))), dt, tipo, res, str(r['VENDEDOR']).upper().strip(), limpar_int(r['VALOR'])])
+                # Normaliza vendedor na importação
+                v_imp = str(r['VENDEDOR']).strip().upper()
+                novos.append([''.join(filter(str.isdigit, str(r['CNPJ']))), dt, tipo, res, v_imp, limpar_int(r['VALOR'])])
         if novos: 
             conectar_google_sheets().worksheet("Interacoes").append_rows(novos)
             st.cache_data.clear()
@@ -227,13 +245,17 @@ if not st.session_state['logado']:
         else: st.error("Senha Incorreta")
     st.stop()
 
-# DADOS SESSÃO
+# ESTADO
 u_log = st.session_state['u_atual']
 df_cli = st.session_state['df_cli']
 df_int = st.session_state['df_int']
 u_data = df_cfg[df_cfg['Usuario']==u_log].iloc[0]
 tipo_u = str(u_data['Tipo']).upper().strip()
-carts = [x.strip() for x in str(u_data['Carteira_Alvo']).split(',')]
+
+# NORMALIZAÇÃO DE CARTEIRAS (Crucial)
+# Pega a string, separa por vírgula, remove espaços e põe maiúsculo
+carts_raw = str(u_data['Carteira_Alvo']).split(',')
+carts = [x.strip().upper() for x in carts_raw if x.strip() != '']
 
 # SIDEBAR
 if URL_LOGO: st.sidebar.image(URL_LOGO, width=150)
@@ -309,6 +331,8 @@ if "TODOS" in carts:
     meus_cli = df_cli
     minhas_int = df_int
 else:
+    # AQUI ESTAVA O PROBLEMA: ISIN PRECISA DE MATCH EXATO
+    # Carts já foi normalizado lá em cima. Agora Ultimo_Vendedor já vem normalizado do cache.
     meus_cli = df_cli[df_cli['Ultimo_Vendedor'].isin(carts)]
     minhas_int = df_int[df_int['Vendedor'].isin(carts)]
 
@@ -338,10 +362,8 @@ if tipo_u == "GESTOR":
     else: dff = pd.DataFrame()
         
     if not dff.empty:
-        # CORREÇÃO: Forçar atualização dos Nomes (Corrige o '...') no Gestor
-        # Isso garante que o gestor veja os nomes reais, mesmo se foram salvos como '...' para otimização
         mapa_atualizado = dict(zip(df_cli['KEY_DOC'], df_cli['Nome_Fantasia']))
-        dff = dff.copy() # Evita warning
+        dff = dff.copy()
         dff['Nome_Cliente'] = dff['KEY_DOC'].map(mapa_atualizado).fillna("Nome não encontrado")
 
         resols = set(dff[dff['Tipo'].isin(['Venda Fechada','Venda Perdida'])]['Resumo'])
@@ -387,8 +409,9 @@ else:
     with col_list:
         st.markdown("### 🔍 Filtros")
         busca = st.text_input("Buscar", placeholder="Nome ou CNPJ...")
+        # CORREÇÃO: Adicionada opção NOVO S/ INTERAÇÃO
         status_padrao = ['⏳ NEGOCIAÇÃO', '⚠️ FOLLOW-UP']
-        filtro_status = st.multiselect("Status", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '🟢 ATIVO', '⭐ VENDA RECENTE'], default=status_padrao)
+        filtro_status = st.multiselect("Status", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '🟢 ATIVO', '⭐ VENDA RECENTE', '🆕 NOVO S/ INTERAÇÃO'], default=status_padrao)
         
         if busca:
             busca = busca.upper()
