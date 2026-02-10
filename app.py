@@ -10,7 +10,7 @@ import re
 import time
 
 # --- CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 20.1", layout="wide")
+st.set_page_config(page_title="CRM Master 21.0", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
 # --- CSS (VISUAL DARK PREMIUM) ---
@@ -97,22 +97,19 @@ def carregar_dados_completos():
     spreadsheet = conectar_google_sheets()
     if spreadsheet is None: return None, None, None
     try:
-        # Config (AGORA COM 3 METAS)
+        # Config
         try:
             sheet_config = spreadsheet.worksheet("Config_Equipe")
             df_config = pd.DataFrame(sheet_config.get_all_records())
             for col in df_config.columns: df_config[col] = df_config[col].astype(str)
             
-            # Tratamento das Metas (Se não existir coluna, cria com 0)
+            # Tratamento das Metas
             if 'Meta_Fat' in df_config.columns: df_config['Meta_Fat'] = df_config['Meta_Fat'].apply(limpar_valor_inteiro)
             else: df_config['Meta_Fat'] = 0
-            
             if 'Meta_Clientes' in df_config.columns: df_config['Meta_Clientes'] = df_config['Meta_Clientes'].apply(limpar_valor_inteiro)
             else: df_config['Meta_Clientes'] = 0
-            
             if 'Meta_Atividades' in df_config.columns: df_config['Meta_Atividades'] = df_config['Meta_Atividades'].apply(limpar_valor_inteiro)
             else: df_config['Meta_Atividades'] = 0
-                
         except: return None, None, None
 
         # Clientes
@@ -314,7 +311,7 @@ def fechar_proposta_automatica(cid, usuario_logado, proposta_row, status_novo):
 # --- APP ---
 try:
     if URL_LOGO: st.sidebar.image(URL_LOGO, width=150)
-    st.sidebar.title("🚀 CRM Master 20.1")
+    st.sidebar.title("🚀 CRM Master 21.0")
     
     with st.spinner("Conectando..."):
         df, df_interacoes, df_config = carregar_dados_completos()
@@ -607,12 +604,24 @@ try:
                         with st.container(border=True):
                             st.markdown(f"### {cli['Nome_Fantasia']}")
                             col_d1, col_d2 = st.columns(2)
+                            
+                            # DADOS DE CONTATO E LOCAL
                             v_contato = cli.get('Nome_Contato', '-') if 'Nome_Contato' in cli else cli.get('Contato', '-')
                             col_d1.write(f"**👤 Contato:** {v_contato}")
                             col_d1.write(f"**📞 Tel:** {cli.get('Telefone_Contato1', '-')}")
+                            # Novos Campos (Cidade/UF)
+                            cidade = cli.get('Cidade', '-')
+                            uf = cli.get('UF', '-')
+                            col_d1.write(f"**📍 Local:** {cidade}/{uf}")
+
+                            # DADOS COMERCIAIS
                             v_dono = cli.get('Ultimo_Vendedor', '-')
                             col_d2.write(f"**👔 Carteira:** {v_dono}")
                             col_d2.write(f"**💰 Total:** {formatar_moeda_visual(cli.get('Total_Compras', 0))}")
+                            # Novo Campo (Data Ultima Compra)
+                            dt_ult = formatar_data_br(cli.get('Data_Ultima_Compra', '-'))
+                            col_d2.write(f"**📅 Últ. Compra:** {dt_ult}")
+
                             st.divider()
                             tab_hist, tab_prop, tab_nova = st.tabs(["📜 Histórico", "💰 Propostas Abertas", "📝 Nova Ação"])
                             with tab_hist:
