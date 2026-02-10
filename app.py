@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 24.6", layout="wide")
+st.set_page_config(page_title="CRM Master 24.7", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
 # --- CSS ---
@@ -25,7 +25,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. HELPERS (Funções de Ajuda) ---
+# --- 2. HELPERS ---
 def gerar_id_proposta(): 
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
@@ -55,7 +55,7 @@ def fmt_doc(v):
     d = limpar_doc(v)
     return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}" if len(d)>11 else f"{d[:3]}.{d[3:6]}.{d[6:9]}-{d[9:]}"
 
-# --- 3. CONEXÃO GOOGLE SHEETS ---
+# --- 3. CONEXÃO GOOGLE ---
 def conectar_google_sheets():
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(st.secrets["credenciais_google"]), ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
@@ -64,13 +64,13 @@ def conectar_google_sheets():
         st.error(f"Erro Conexão: {e}")
         return None
 
-# --- 4. CARREGAMENTO DE DADOS (CACHE) ---
+# --- 4. CARREGAMENTO (CACHE) ---
 @st.cache_data(ttl=3600)
 def carregar_dados_cache():
     ss = conectar_google_sheets()
     if not ss: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
-    # Configuração
+    # Config
     try:
         df_cfg = pd.DataFrame(ss.worksheet("Config_Equipe").get_all_records()).astype(str)
         for c in ['Meta_Fat','Meta_Clientes','Meta_Atividades']: 
@@ -84,7 +84,6 @@ def carregar_dados_cache():
             df_cli.columns = df_cli.columns.str.strip()
             df_cli['ID_Cliente_CNPJ_CPF'] = df_cli['ID_Cliente_CNPJ_CPF'].astype(str)
             df_cli['KEY_DOC'] = df_cli['ID_Cliente_CNPJ_CPF'].apply(limpar_doc)
-            
             if 'Total_Compras' in df_cli.columns: df_cli['Total_Compras'] = df_cli['Total_Compras'].apply(limpar_int)
             if 'Data_Ultima_Compra' in df_cli.columns: df_cli['Data_Ultima_Compra'] = pd.to_datetime(df_cli['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
     except: df_cli = pd.DataFrame()
@@ -114,7 +113,7 @@ def carregar_dados_cache():
 
     return df_cfg, df_cli, df_int
 
-# --- 5. MOTOR DE CÁLCULO DE STATUS ---
+# --- 5. MOTOR DE CÁLCULO ---
 def recalcular_status_massa(df_c, df_i):
     if df_c.empty: return df_c
     hoje = datetime.now().date()
@@ -134,7 +133,6 @@ def recalcular_status_massa(df_c, df_i):
         key = row['KEY_DOC']
         ultima_acao = mapa_status_interacao.get(key)
         if not ultima_acao: return row['Status']
-        
         if ultima_acao == 'Orçamento Enviado': return '⏳ NEGOCIAÇÃO'
         elif ultima_acao in ['Ligação Realizada', 'WhatsApp Enviado', 'Agendou Visita']: return '⚠️ FOLLOW-UP'
         elif ultima_acao == 'Venda Perdida': return '👎 VENDA PERDIDA'
@@ -159,6 +157,7 @@ def salvar_nuvem(cnpj, data_input, tipo, resumo, vend, val):
         ss.worksheet("Interacoes").append_row([str(cnpj), data_obj.strftime('%d/%m/%Y'), tipo, resumo_final, vend, int(val)])
         
         cnpj_clean = limpar_doc(cnpj)
+        # O Nome_Cliente fica '...' aqui para ser rápido, mas o Gestor corrige na visualização
         novo = {
             'CNPJ_Cliente': str(cnpj), 'KEY_DOC': cnpj_clean, 'Data_Obj': data_obj,
             'Tipo': tipo, 'Resumo': resumo_final, 'Vendedor': vend, 'Valor_Proposta': int(val), 'Nome_Cliente': '...'
@@ -228,7 +227,7 @@ if not st.session_state['logado']:
         else: st.error("Senha Incorreta")
     st.stop()
 
-# ESTADO
+# DADOS SESSÃO
 u_log = st.session_state['u_atual']
 df_cli = st.session_state['df_cli']
 df_int = st.session_state['df_int']
@@ -254,7 +253,6 @@ if tipo_u == "GESTOR":
     ma = vendedores_cfg['Meta_Atividades'].sum()
     if not df_int.empty:
         df_mes_gestor = df_int[df_int['Data_Obj'] >= prim_dia]
-        # Se Gestor tiver "TODOS", soma tudo. Se tiver lista, soma lista.
         if "TODOS" not in carts:
             lista_team = carts
             df_mes_gestor = df_mes_gestor[df_mes_gestor['Vendedor'].isin(lista_team)]
@@ -322,12 +320,9 @@ if tipo_u == "GESTOR":
         di = c1.date_input("De", value=datetime.now()-timedelta(days=30))
         df = c2.date_input("Até", value=datetime.now())
         
-        # --- FILTRO POR CANAL (Carteira Alvo) ---
         if "TODOS" in carts:
             lista_vendedores_disponiveis = sorted(df_cfg[df_cfg['Tipo'] == 'VENDEDOR']['Usuario'].unique())
         else:
-            # Mostra apenas os vendedores que estão na Carteira_Alvo do Gestor
-            # Isso garante que ele veja apenas o "Canal" dele
             lista_vendedores_disponiveis = sorted([v for v in carts if v in df_cfg['Usuario'].values])
             
         sel_v = c3.multiselect("Vendedores", lista_vendedores_disponiveis)
@@ -343,6 +338,12 @@ if tipo_u == "GESTOR":
     else: dff = pd.DataFrame()
         
     if not dff.empty:
+        # CORREÇÃO: Forçar atualização dos Nomes (Corrige o '...') no Gestor
+        # Isso garante que o gestor veja os nomes reais, mesmo se foram salvos como '...' para otimização
+        mapa_atualizado = dict(zip(df_cli['KEY_DOC'], df_cli['Nome_Fantasia']))
+        dff = dff.copy() # Evita warning
+        dff['Nome_Cliente'] = dff['KEY_DOC'].map(mapa_atualizado).fillna("Nome não encontrado")
+
         resols = set(dff[dff['Tipo'].isin(['Venda Fechada','Venda Perdida'])]['Resumo'])
         ids_res = set([extrair_id(x) for x in resols if extrair_id(x)])
         peds_res = set([extrair_pedido_protheus(x) for x in resols if extrair_pedido_protheus(x)])
@@ -356,7 +357,6 @@ if tipo_u == "GESTOR":
         k2.metric("Na Mesa", fmt_moeda(mesa))
         k3.metric("Fechado", fmt_moeda(dff[dff['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()))
         
-        # ABAS: RANKING E DETALHES
         t1, t2 = st.tabs(["🏆 Ranking", "📝 Detalhes das Vendas"])
         
         with t1:
@@ -372,7 +372,6 @@ if tipo_u == "GESTOR":
             st.dataframe(agg, use_container_width=True)
             
         with t2:
-            # Tabela detalhada
             view_detalhes = dff[['Data_Obj', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta', 'Vendedor']].copy()
             view_detalhes['Valor_Proposta'] = view_detalhes['Valor_Proposta'].apply(fmt_moeda)
             view_detalhes['Data_Obj'] = view_detalhes['Data_Obj'].apply(fmt_data)
@@ -402,7 +401,11 @@ else:
         cid_selecionado = None
         if not lista_final.empty:
             with st.container(height=600):
-                cid_selecionado = st.radio("Selecione:", lista_final.head(100)['ID_Cliente_CNPJ_CPF'].tolist(), format_func=lambda x: f"[{lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Status'].values[0]}] {lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}")
+                cid_selecionado = st.radio(
+                    "Selecione:",
+                    lista_final.head(100)['ID_Cliente_CNPJ_CPF'].tolist(),
+                    format_func=lambda x: f"[{lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Status'].values[0]}] {lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}"
+                )
         else: st.info("Nenhum cliente.")
 
     with col_det:
