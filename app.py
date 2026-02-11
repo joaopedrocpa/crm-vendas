@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="CRM Master 24.8", layout="wide")
+st.set_page_config(page_title="CRM Master 24.9", layout="wide")
 URL_LOGO = "https://cdn-icons-png.flaticon.com/512/9187/9187604.png"
 
 # --- CSS ---
@@ -75,8 +75,6 @@ def carregar_dados_cache():
         df_cfg = pd.DataFrame(ss.worksheet("Config_Equipe").get_all_records()).astype(str)
         for c in ['Meta_Fat','Meta_Clientes','Meta_Atividades']: 
             if c in df_cfg.columns: df_cfg[c] = df_cfg[c].apply(limpar_int)
-        
-        # NORMALIZAÇÃO DE TEXTO (Remove espaços e deixa Maiúsculo)
         if 'Usuario' in df_cfg.columns: 
             df_cfg['Usuario'] = df_cfg['Usuario'].str.strip().str.upper()
     except: df_cfg = pd.DataFrame()
@@ -88,11 +86,8 @@ def carregar_dados_cache():
             df_cli.columns = df_cli.columns.str.strip()
             df_cli['ID_Cliente_CNPJ_CPF'] = df_cli['ID_Cliente_CNPJ_CPF'].astype(str)
             df_cli['KEY_DOC'] = df_cli['ID_Cliente_CNPJ_CPF'].apply(limpar_doc)
-            
-            # NORMALIZAÇÃO DE VENDEDOR (Crucial para o seu erro)
             if 'Ultimo_Vendedor' in df_cli.columns:
                 df_cli['Ultimo_Vendedor'] = df_cli['Ultimo_Vendedor'].astype(str).str.strip().str.upper()
-
             if 'Total_Compras' in df_cli.columns: df_cli['Total_Compras'] = df_cli['Total_Compras'].apply(limpar_int)
             if 'Data_Ultima_Compra' in df_cli.columns: df_cli['Data_Ultima_Compra'] = pd.to_datetime(df_cli['Data_Ultima_Compra'], dayfirst=True, errors='coerce')
     except: df_cli = pd.DataFrame()
@@ -102,7 +97,6 @@ def carregar_dados_cache():
         df_leads = pd.DataFrame(ss.worksheet("Novos_Leads").get_all_records()).astype(str)
         if not df_leads.empty: 
             df_leads['KEY_DOC'] = df_leads['ID_Cliente_CNPJ_CPF'].apply(limpar_doc)
-            # Normaliza Vendedor no Lead
             if 'Vendedor' in df_leads.columns: df_leads['Vendedor'] = df_leads['Vendedor'].str.strip().str.upper()
             df_cli = pd.concat([df_cli, df_leads], ignore_index=True)
     except: pass
@@ -115,8 +109,6 @@ def carregar_dados_cache():
             if 'Data' in df_int.columns: df_int['Data_Obj'] = pd.to_datetime(df_int['Data'], dayfirst=True, errors='coerce').dt.date
             df_int['CNPJ_Cliente'] = df_int['CNPJ_Cliente'].astype(str)
             df_int['KEY_DOC'] = df_int['CNPJ_Cliente'].apply(limpar_doc)
-            
-            # Normaliza Vendedor nas Interações
             if 'Vendedor' in df_int.columns: df_int['Vendedor'] = df_int['Vendedor'].astype(str).str.strip().str.upper()
             
             if 'Nome_Cliente' not in df_int.columns: df_int['Nome_Cliente'] = None
@@ -168,7 +160,6 @@ def salvar_nuvem(cnpj, data_input, tipo, resumo, vend, val):
             resumo_final = f"{id_prop} {resumo}"
 
         ss = conectar_google_sheets()
-        # Salva o Vendedor normalizado (Maiúsculo, sem espaço)
         vend_clean = str(vend).strip().upper()
         ss.worksheet("Interacoes").append_row([str(cnpj), data_obj.strftime('%d/%m/%Y'), tipo, resumo_final, vend_clean, int(val)])
         
@@ -211,7 +202,6 @@ def proc_import(file, df_old):
                 res = f"{'#'+gerar_id_proposta()+' ' if tipo=='Orçamento Enviado' else ''}[PROTHEUS] Pedido: {pid} | {stt}"
                 try: dt = pd.to_datetime(r['DATA']).strftime('%d/%m/%Y')
                 except: dt = datetime.now().strftime('%d/%m/%Y')
-                # Normaliza vendedor na importação
                 v_imp = str(r['VENDEDOR']).strip().upper()
                 novos.append([''.join(filter(str.isdigit, str(r['CNPJ']))), dt, tipo, res, v_imp, limpar_int(r['VALOR'])])
         if novos: 
@@ -245,27 +235,20 @@ if not st.session_state['logado']:
         else: st.error("Senha Incorreta")
     st.stop()
 
-# ESTADO
 u_log = st.session_state['u_atual']
 df_cli = st.session_state['df_cli']
 df_int = st.session_state['df_int']
 u_data = df_cfg[df_cfg['Usuario']==u_log].iloc[0]
 tipo_u = str(u_data['Tipo']).upper().strip()
-
-# NORMALIZAÇÃO DE CARTEIRAS (Crucial)
-# Pega a string, separa por vírgula, remove espaços e põe maiúsculo
 carts_raw = str(u_data['Carteira_Alvo']).split(',')
 carts = [x.strip().upper() for x in carts_raw if x.strip() != '']
 
-# SIDEBAR
 if URL_LOGO: st.sidebar.image(URL_LOGO, width=150)
 st.sidebar.title(f"Olá, {u_log}")
-
 if st.sidebar.button("🔄 Atualizar"): st.cache_data.clear(); st.rerun()
 if st.sidebar.button("Sair"): st.session_state['logado'] = False; st.rerun()
 st.sidebar.divider()
 
-# METAS
 prim_dia = datetime.now().date().replace(day=1)
 
 if tipo_u == "GESTOR":
@@ -278,7 +261,6 @@ if tipo_u == "GESTOR":
         if "TODOS" not in carts:
             lista_team = carts
             df_mes_gestor = df_mes_gestor[df_mes_gestor['Vendedor'].isin(lista_team)]
-        
         fat_r = df_mes_gestor[df_mes_gestor['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()
         cli_r = df_mes_gestor[df_mes_gestor['Tipo']=='Venda Fechada']['CNPJ_Cliente'].nunique()
         ativ_r = len(df_mes_gestor[df_mes_gestor['Tipo'].isin(['Ligação Realizada','WhatsApp Enviado','Agendou Visita'])])
@@ -305,8 +287,8 @@ st.sidebar.caption(f"👥 Cli: {cli_r} / {mc}")
 st.sidebar.progress(min(cli_r/mc, 1.0) if mc > 0 else 0)
 st.sidebar.caption(f"🔨 Ativ: {ativ_r} / {ma}")
 st.sidebar.progress(min(ativ_r/ma, 1.0) if ma > 0 else 0)
-
 st.sidebar.divider()
+
 if tipo_u == "GESTOR":
     with st.sidebar.expander("📥 Importar Protheus"):
         f = st.file_uploader("Excel", type=["xlsx"])
@@ -326,13 +308,10 @@ if "TODOS" in carts or tipo_u == "VENDEDOR":
         if st.button("Salvar Lead"):
             if salvar_lead(n,d,c,t,u_log,o,a,r,v): st.success("Salvo!"); time.sleep(1); st.rerun()
 
-# --- FILTRAGEM ---
 if "TODOS" in carts:
     meus_cli = df_cli
     minhas_int = df_int
 else:
-    # AQUI ESTAVA O PROBLEMA: ISIN PRECISA DE MATCH EXATO
-    # Carts já foi normalizado lá em cima. Agora Ultimo_Vendedor já vem normalizado do cache.
     meus_cli = df_cli[df_cli['Ultimo_Vendedor'].isin(carts)]
     minhas_int = df_int[df_int['Vendedor'].isin(carts)]
 
@@ -343,12 +322,10 @@ if tipo_u == "GESTOR":
         c1,c2,c3 = st.columns(3)
         di = c1.date_input("De", value=datetime.now()-timedelta(days=30))
         df = c2.date_input("Até", value=datetime.now())
-        
         if "TODOS" in carts:
             lista_vendedores_disponiveis = sorted(df_cfg[df_cfg['Tipo'] == 'VENDEDOR']['Usuario'].unique())
         else:
             lista_vendedores_disponiveis = sorted([v for v in carts if v in df_cfg['Usuario'].values])
-            
         sel_v = c3.multiselect("Vendedores", lista_vendedores_disponiveis)
     
     if not minhas_int.empty:
@@ -369,15 +346,30 @@ if tipo_u == "GESTOR":
         resols = set(dff[dff['Tipo'].isin(['Venda Fechada','Venda Perdida'])]['Resumo'])
         ids_res = set([extrair_id(x) for x in resols if extrair_id(x)])
         peds_res = set([extrair_pedido_protheus(x) for x in resols if extrair_pedido_protheus(x)])
-        mesa = 0
-        for _, row in dff[dff['Tipo']=='Orçamento Enviado'].iterrows():
-            if not ((extrair_id(row['Resumo']) in ids_res) or (extrair_pedido_protheus(row['Resumo']) in peds_res)):
-                mesa += row['Valor_Proposta']
         
-        k1,k2,k3 = st.columns(3)
-        k1.metric("Orçado", fmt_moeda(dff[dff['Tipo']=='Orçamento Enviado']['Valor_Proposta'].sum()))
+        mesa = 0
+        perdido = 0
+        orcado = 0
+        fechado = 0
+
+        # Loop único para calcular KPIs com precisão
+        for _, row in dff.iterrows():
+            if row['Tipo'] == 'Orçamento Enviado':
+                # Verifica se está aberto
+                if not ((extrair_id(row['Resumo']) in ids_res) or (extrair_pedido_protheus(row['Resumo']) in peds_res)):
+                    mesa += row['Valor_Proposta']
+                orcado += row['Valor_Proposta']
+            elif row['Tipo'] == 'Venda Fechada':
+                fechado += row['Valor_Proposta']
+            elif row['Tipo'] == 'Venda Perdida':
+                perdido += row['Valor_Proposta']
+        
+        # --- NOVO: 4 COLUNAS DE KPI ---
+        k1,k2,k3,k4 = st.columns(4)
+        k1.metric("Orçado", fmt_moeda(orcado))
         k2.metric("Na Mesa", fmt_moeda(mesa))
-        k3.metric("Fechado", fmt_moeda(dff[dff['Tipo']=='Venda Fechada']['Valor_Proposta'].sum()))
+        k3.metric("Fechado", fmt_moeda(fechado))
+        k4.metric("Perdido", fmt_moeda(perdido)) # KPI NOVO
         
         t1, t2 = st.tabs(["🏆 Ranking", "📝 Detalhes das Vendas"])
         
@@ -386,7 +378,6 @@ if tipo_u == "GESTOR":
                 Fat=('Valor_Proposta', lambda x: x[dff.loc[x.index,'Tipo']=='Venda Fechada'].sum()),
                 Cli=('CNPJ_Cliente', lambda x: x[dff.loc[x.index,'Tipo']=='Venda Fechada'].nunique())
             ).reset_index()
-            
             df_metas_merge = df_cfg[['Usuario', 'Meta_Fat']].rename(columns={'Usuario':'Vendedor'})
             agg = pd.merge(agg, df_metas_merge, on='Vendedor', how='left').fillna(0)
             agg['% Meta'] = agg.apply(lambda x: f"{x['Fat']/x['Meta_Fat']*100:.0f}%" if x['Meta_Fat']>0 else "-", axis=1)
@@ -395,9 +386,21 @@ if tipo_u == "GESTOR":
             
         with t2:
             view_detalhes = dff[['Data_Obj', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta', 'Vendedor']].copy()
-            view_detalhes['Valor_Proposta'] = view_detalhes['Valor_Proposta'].apply(fmt_moeda)
+            view_detalhes['Valor_Proposta_Fmt'] = view_detalhes['Valor_Proposta'].apply(fmt_moeda)
             view_detalhes['Data_Obj'] = view_detalhes['Data_Obj'].apply(fmt_data)
-            st.dataframe(view_detalhes, use_container_width=True)
+            
+            # --- NOVO: BOTÃO DE EXPORTAÇÃO ---
+            st.markdown("### Exportar Dados")
+            csv = view_detalhes.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 Baixar Relatório (Excel/CSV)",
+                data=csv,
+                file_name=f"relatorio_vendas_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv"
+            )
+            
+            # Mostra tabela (sem a coluna formatada para não duplicar, mas usamos a formatada visualmente se quiser)
+            st.dataframe(view_detalhes[['Data_Obj', 'Nome_Cliente', 'Tipo', 'Resumo', 'Valor_Proposta_Fmt', 'Vendedor']], use_container_width=True)
             
     else: st.info("Sem dados.")
 
@@ -405,30 +408,22 @@ if tipo_u == "GESTOR":
 else:
     st.title("💼 Minha Carteira")
     col_list, col_det = st.columns([1, 1.2])
-    
     with col_list:
         st.markdown("### 🔍 Filtros")
         busca = st.text_input("Buscar", placeholder="Nome ou CNPJ...")
-        # CORREÇÃO: Adicionada opção NOVO S/ INTERAÇÃO
         status_padrao = ['⏳ NEGOCIAÇÃO', '⚠️ FOLLOW-UP']
         filtro_status = st.multiselect("Status", ['🔴 RECUPERAR', '⚠️ FOLLOW-UP', '⏳ NEGOCIAÇÃO', '🟢 ATIVO', '⭐ VENDA RECENTE', '🆕 NOVO S/ INTERAÇÃO'], default=status_padrao)
-        
         if busca:
             busca = busca.upper()
             mask_busca = (meus_cli['Nome_Fantasia'].str.upper().str.contains(busca, na=False)) | (meus_cli['KEY_DOC'].str.contains(limpar_doc(busca), na=False))
             lista_final = meus_cli[mask_busca]
         else:
             lista_final = meus_cli[meus_cli['Status'].isin(filtro_status)].sort_values('Status')
-
         st.caption(f"{len(lista_final)} clientes.")
         cid_selecionado = None
         if not lista_final.empty:
             with st.container(height=600):
-                cid_selecionado = st.radio(
-                    "Selecione:",
-                    lista_final.head(100)['ID_Cliente_CNPJ_CPF'].tolist(),
-                    format_func=lambda x: f"[{lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Status'].values[0]}] {lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}"
-                )
+                cid_selecionado = st.radio("Selecione:", lista_final.head(100)['ID_Cliente_CNPJ_CPF'].tolist(), format_func=lambda x: f"[{lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Status'].values[0]}] {lista_final[lista_final['ID_Cliente_CNPJ_CPF']==x]['Nome_Fantasia'].values[0]}")
         else: st.info("Nenhum cliente.")
 
     with col_det:
@@ -445,12 +440,9 @@ else:
                 d2.markdown(f"**💰** {fmt_moeda(c_dados.get('Total_Compras', 0))}")
                 d2.markdown(f"**📅** {fmt_data(c_dados.get('Data_Ultima_Compra', '-'))}")
                 st.divider()
-                
                 key_selecionada = limpar_doc(cid_selecionado)
                 c_ints = minhas_int[minhas_int['KEY_DOC'] == key_selecionada].sort_values('Data_Obj', ascending=False)
-                
                 tab1, tab2, tab3 = st.tabs(["📜 Hist", "💰 Abertas", "📝 Nova"])
-                
                 with tab1:
                     if not c_ints.empty:
                         view = c_ints[['Data_Obj', 'Tipo', 'Resumo', 'Valor_Proposta']].copy()
@@ -458,7 +450,6 @@ else:
                         view['Data_Obj'] = view['Data_Obj'].apply(fmt_data)
                         st.dataframe(view, hide_index=True, use_container_width=True)
                     else: st.info("Sem histórico.")
-                
                 with tab2:
                     resols_cli = set(c_ints[c_ints['Tipo'].isin(['Venda Fechada', 'Venda Perdida'])]['Resumo'])
                     ids_res = set([extrair_id(x) for x in resols_cli if extrair_id(x)])
@@ -467,7 +458,6 @@ else:
                     for _, row in c_ints[c_ints['Tipo'] == 'Orçamento Enviado'].iterrows():
                         pid, ped = extrair_id(row['Resumo']), extrair_pedido_protheus(row['Resumo'])
                         if not ((pid and pid in ids_res) or (ped and ped in peds_res)): abertas.append(row)
-                    
                     if abertas:
                         for i, r in enumerate(abertas):
                             with st.container(border=True):
@@ -479,7 +469,6 @@ else:
                                 if cc.button("❌", key=f"loss_{i}"):
                                     if salvar_nuvem(cid_selecionado, datetime.now(), "Venda Perdida", f"Ref {r['Resumo']}", u_log, r['Valor_Proposta']): st.rerun()
                     else: st.info("Nada pendente.")
-
                 with tab3:
                     with st.form(key="nova_acao_form"):
                         act = st.selectbox("Ação", ["Ligação Realizada", "WhatsApp Enviado", "Orçamento Enviado", "Agendou Visita"])
